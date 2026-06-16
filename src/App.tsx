@@ -615,11 +615,12 @@ function App() {
             <table>
               <thead>
                 <tr>
-                  <th>序号</th>
+                  <th></th>
                   <th>单号</th>
+                  <th>SSR角色</th>
                   <th>{isSingleRowLayout ? '数向' : '边'}</th>
                   <th>{isSingleRowLayout ? '排位' : '侧位'}</th>
-                  <th>SSR角色</th>
+                  <th>序号</th>
                   <th>金/银</th>
                   <th>UR角色</th>
                   <th>QTR</th>
@@ -634,14 +635,15 @@ function App() {
                     </>
                   )}
                   <th>备注</th>
-                  <th></th>
                 </tr>
               </thead>
               <tbody>
                 {pagedRecords.map((record) => (
                   <tr className={!record.ssrRole ? 'pending-row' : undefined} key={record.id}>
-                    <td className="readonly-cell">
-                      #{record.sequence}
+                    <td>
+                      <button type="button" className="icon-button" onClick={() => removeRecord(record.id)} aria-label="删除">
+                        ×
+                      </button>
                     </td>
                     <td>
                       <input
@@ -652,6 +654,19 @@ function App() {
                           updateRecord(record.id, { orderId: Number(event.target.value) || undefined })
                         }
                       />
+                    </td>
+                    <td>
+                      <select
+                        value={record.ssrRole}
+                        onChange={(event) =>
+                          updateRecord(record.id, { ssrRole: event.target.value as RoleId | '' })
+                        }
+                      >
+                        <option value="">无/未见</option>
+                        {ROLES.map((role) => (
+                          <option key={role.id} value={role.id}>{roleLabel(role.id)}</option>
+                        ))}
+                      </select>
                     </td>
                     <td>
                       <select
@@ -678,18 +693,8 @@ function App() {
                         placeholder={isSingleRowLayout ? '第几包' : '几'}
                       />
                     </td>
-                    <td>
-                      <select
-                        value={record.ssrRole}
-                        onChange={(event) =>
-                          updateRecord(record.id, { ssrRole: event.target.value as RoleId | '' })
-                        }
-                      >
-                        <option value="">无/未见</option>
-                        {ROLES.map((role) => (
-                          <option key={role.id} value={role.id}>{roleLabel(role.id)}</option>
-                        ))}
-                      </select>
+                    <td className="readonly-cell">
+                      #{record.sequence}
                     </td>
                     <td>
                       <select
@@ -790,11 +795,6 @@ function App() {
                         onChange={(event) => updateRecord(record.id, { note: event.target.value })}
                         placeholder="可记直播间线索"
                       />
-                    </td>
-                    <td>
-                      <button type="button" className="icon-button" onClick={() => removeRecord(record.id)} aria-label="删除">
-                        ×
-                      </button>
                     </td>
                   </tr>
                 ))}
