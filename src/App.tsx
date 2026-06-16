@@ -7,7 +7,7 @@ import {
   calculateAtLeastKHitProbability,
   calculateProbabilities,
 } from './lib/probability'
-import type { CardVariant, GameConfig, PackRecord, RoleId } from './types'
+import type { BasketLayoutMode, BasketSide, CardVariant, GameConfig, PackRecord, RoleId } from './types'
 
 const STORAGE_KEY = 'card-pack-probability-helper:v1'
 const pageSizeOptions = [10, 20, 50]
@@ -29,18 +29,32 @@ const defaultConfig: GameConfig = {
   pSSRSlot: 15 / 16,
   channelCostTarget: 6.5,
   mode: 'mixedBasket',
+  basketLayoutMode: 'twoColumns',
   erPosition: 'unknown',
+  initialPoolPacks: '',
+  observedErCount: '',
+  mixedCaseCount: '',
+  priorPackCount: '',
+  priorHitCount: '',
+  priorSpend: '',
+  customBuyCount: '',
 }
 
-const blankRecord = (sequence: number): PackRecord => ({
+const blankRecord = (sequence: number, orderId: number): PackRecord => ({
   id: crypto.randomUUID(),
   sequence,
+  orderId,
+  side: '',
+  sidePosition: '',
   ssrRole: '',
   ssrVariant: '',
   urRole: '',
   qtrId: '',
   erHit: false,
   spHit: false,
+  leftTotalBefore: '',
+  rightTotalBefore: '',
+  rowTotalBefore: '',
   note: '',
 })
 
@@ -50,6 +64,23 @@ function percent(value: number) {
 
 function money(value: number) {
   return `¥${value.toFixed(2)}`
+}
+
+function numericConfigValue(value: number | '' | undefined) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function erDensityLabel(erCount: number, poolPacks?: number) {
+  if (!poolPacks || erCount <= 0) return '-'
+  return `约 ${Math.round(poolPacks / erCount)} 包/张`
+}
+
+function erDensityLevel(erCount: number, poolPacks?: number) {
+  if (!poolPacks || erCount <= 0) return 'unknown'
+  const packsPerEr = poolPacks / erCount
+  if (packsPerEr <= 40) return 'high'
+  if (packsPerEr <= 80) return 'normal'
+  return 'low'
 }
 
 function roleLabel(roleId?: RoleId | '') {
@@ -120,6 +151,10 @@ function App() {
     () => Math.max(0, ...records.map((record) => record.sequence)) + 1,
     [records],
   )
+  const currentOrderId = useMemo(
+    () => Math.max(0, ...records.map((record) => record.orderId ?? record.sequence)),
+    [records],
+  )
 
   useEffect(() => {
     localStorage.setItem(
@@ -138,15 +173,20 @@ function App() {
     )
   }
 
-  function addRecord() {
-    setRecords((current) => [blankRecord(nextSequence), ...current])
+  function addOrder() {
+    setRecords((current) => {
+      const sequence = Math.max(0, ...current.map((record) => record.sequence)) + 1
+      const orderId = Math.max(0, ...current.map((record) => record.orderId ?? record.sequence)) + 1
+      return [blankRecord(sequence, orderId), ...current]
+    })
     setCurrentPage(1)
   }
 
-  function addRecords(count: number) {
+  function addRecordsToCurrentOrder(count: number) {
     setRecords((current) => {
       const start = Math.max(0, ...current.map((record) => record.sequence)) + 1
-      const newRows = Array.from({ length: count }, (_, index) => blankRecord(start + index))
+      const orderId = Math.max(1, ...current.map((record) => record.orderId ?? record.sequence))
+      const newRows = Array.from({ length: count }, (_, index) => blankRecord(start + index, orderId))
       return [...newRows, ...current]
     })
     setCurrentPage(1)
@@ -215,11 +255,64 @@ function App() {
   }
 
   const top = result.topRows[0]
-  const top2 = result.topRows[1]
-  const buyCounts = [1, 3, 5, 10, 15, 20, 30]
-  const topAtLeastTwoHits = top
-    ? calculateAtLeastKHitProbability(top.pHit, config.plannedPackCount, 2)
-    : 0
+  const customBuyCount = Math.floor(numericConfigValue(config.customBuyCount))
+  const buyCounts = [...new Set([1, 3, 5, 7, 10, 15, 17, 20, 24, 30, customBuyCount])]
+    .filter((count) => count > 0)
+    .sort((a, b) => a - b)
+  const priorPackCount = numericConfigValue(config.priorPackCount)
+  const priorHitCount = numericConfigValue(config.priorHitCount)
+  const priorSpend =
+    typeof config.priorSpend === 'number'
+      ? config.priorSpend
+      : priorPackCount * result.actualPrice
+  const priorRewardPacks = priorHitCount * config.rewardBoxPacks
+  const priorEffectivePacks = priorPackCount + priorRewardPacks
+  const currentActualCost =
+    priorEffectivePacks > 0 ? priorSpend / priorEffectivePacks : undefined
+  const ssrTotal = records.filter((record) => record.ssrRole).length
+  const recordedErCount = records.filter((record) => record.erHit).length
+  const knownErCount =
+    typeof config.observedErCount === 'number' ? config.observedErCount : 0
+  const estimatedRemainingPacks =
+    typeof config.initialPoolPacks === 'number'
+      ? Math.max(0, config.initialPoolPacks - records.length)
+      : undefined
+  const expectedInitialErCount =
+    typeof config.mixedCaseCount === 'number'
+      ? (config.mixedCaseCount * 24 * 16) / 64
+      : typeof config.initialPoolPacks === 'number'
+        ? config.initialPoolPacks / 64
+        : undefined
+  const estimatedRemainingErCount =
+    expectedInitialErCount === undefined
+      ? undefined
+      : Math.max(0, expectedInitialErCount - knownErCount - recordedErCount)
+  const erDensity =
+    estimatedRemainingPacks && estimatedRemainingErCount !== undefined
+      ? estimatedRemainingErCount / estimatedRemainingPacks
+      : undefined
+  const erDensityTone =
+    estimatedRemainingPacks && estimatedRemainingErCount !== undefined
+      ? erDensityLevel(estimatedRemainingErCount, estimatedRemainingPacks)
+      : 'unknown'
+  const maxRoleCount = Math.max(
+    1,
+    ...ROLES.map((role) => records.filter((record) => record.ssrRole === role.id).length),
+  )
+  const sideGroups = [
+    {
+      side: 'left' as const,
+      label: config.basketLayoutMode === 'singleRow' ? '从左数' : '左侧',
+      shortLabel: config.basketLayoutMode === 'singleRow' ? '从左数' : '左',
+    },
+    {
+      side: 'right' as const,
+      label: config.basketLayoutMode === 'singleRow' ? '从右数' : '右侧',
+      shortLabel: config.basketLayoutMode === 'singleRow' ? '从右数' : '右',
+    },
+  ]
+  const isSingleRowLayout = config.basketLayoutMode === 'singleRow'
+  const recordTableColSpan = isSingleRowLayout ? 13 : 14
 
   return (
     <main className="app-shell">
@@ -231,123 +324,197 @@ function App() {
         <div className="status-strip" aria-label="当前模型摘要">
           <span>记录 {records.length} 包</span>
           <span>置信度 {result.confidence === 'low' ? '低' : result.confidence === 'medium' ? '中' : '高'}</span>
+          <span>配置感 {result.configuration.label}</span>
           <span>QTR {result.qtrContinuity.label}</span>
         </div>
       </header>
 
-      <section className="summary-grid">
-        <div className="metric">
-          <span>Top1</span>
-          <strong>{top ? roleLabel(top.role.id) : '-'}</strong>
-          <small>{top ? `有效命中率 ${percent(top.pHit)}` : '暂无记录'}</small>
-        </div>
-        <div className="metric">
-          <span>Top2</span>
-          <strong>{top2 ? roleLabel(top2.role.id) : '-'}</strong>
-          <small>{top2 ? `有效命中率 ${percent(top2.pHit)}` : '暂无记录'}</small>
-        </div>
-        <div className="metric">
-          <span>本次计划</span>
-          <strong>{config.plannedPackCount} 包</strong>
-          <small>{top ? `Top1至少中1盒 ${percent(top.atLeastOneHit)}` : '等待计算'}</small>
-        </div>
-        <div className="metric">
-          <span>Top1至少中2盒</span>
-          <strong>{percent(topAtLeastTwoHits)}</strong>
-          <small>按本次计划 {config.plannedPackCount} 包估算</small>
-        </div>
-      </section>
-
       <section className="workbench">
         <aside className="settings-panel">
-          <h2>参数</h2>
-          <div className="form-grid">
-            <label>
-              单包价格
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={config.packPrice}
-                onChange={(event) => updateConfig('packPrice', Number(event.target.value))}
-              />
-            </label>
-            <label>
-              优惠券抵扣
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={config.couponDiscount}
-                onChange={(event) => updateConfig('couponDiscount', Number(event.target.value))}
-              />
-            </label>
-            <label>
-              准备下单包数
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={config.plannedPackCount}
-                onChange={(event) => updateConfig('plannedPackCount', Number(event.target.value))}
-              />
-            </label>
-            <label>
-              奖励盒包数
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={config.rewardBoxPacks}
-                onChange={(event) => updateConfig('rewardBoxPacks', Number(event.target.value))}
-              />
-            </label>
-            <label>
-              SSR槽概率
-              <select
-                value={String(config.pSSRSlot)}
-                onChange={(event) => updateConfig('pSSRSlot', Number(event.target.value))}
-              >
-                <option value={String(15 / 16)}>15/16 = 93.75%</option>
-                <option value="0.9216">官方约 92.16%</option>
-              </select>
-            </label>
-            <label>
-              渠道价目标
-              <select
-                value={String(config.channelCostTarget)}
-                onChange={(event) => updateConfig('channelCostTarget', Number(event.target.value))}
-              >
-                <option value="6.5">¥6.50</option>
-                <option value="6">¥6.00</option>
-              </select>
-            </label>
-            <label>
-              模式
-              <select
-                value={config.mode}
-                onChange={(event) =>
-                  updateConfig('mode', event.target.value as GameConfig['mode'])
-                }
-              >
-                <option value="mixedBasket">混池模式</option>
-                <option value="singleBoxSequential">单盒连续模式</option>
-              </select>
-            </label>
-            <label>
-              ER位置假设
-              <select
-                value={config.erPosition}
-                onChange={(event) =>
-                  updateConfig('erPosition', event.target.value as GameConfig['erPosition'])
-                }
-              >
-                <option value="unknown">不确定</option>
-                <option value="thinSlot">薄卡位</option>
-                <option value="thickSlot">厚卡位</option>
-              </select>
-            </label>
-          </div>
+          <section className="side-card">
+            <div className="section-heading compact-heading">
+              <div>
+                <h2>本次SSR角色占比</h2>
+                <p>基于当前输入框全部记录，共 {ssrTotal} 张SSR。</p>
+              </div>
+            </div>
+            <div className="frequency-list">
+              {ROLES.map((role) => {
+                const count = records.filter((record) => record.ssrRole === role.id).length
+                const share = ssrTotal > 0 ? count / ssrTotal : 0
+                return (
+                  <div className="frequency-row" key={role.id}>
+                    <span>{role.id}</span>
+                    <b>{role.name}</b>
+                    <div className="bar"><i style={{ width: `${(count / maxRoleCount) * 100}%` }} /></div>
+                    <em>{percent(share)}</em>
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+
+          <section className="pool-info-card">
+            <div className="section-heading compact-heading">
+              <div>
+                <h2>本次混池信息</h2>
+                <p>用于后续判断余量、补池和ER浓度。</p>
+              </div>
+            </div>
+            <div className="pool-info-grid">
+              <label>
+                框位模式
+                <select
+                  value={config.basketLayoutMode}
+                  onChange={(event) =>
+                    updateConfig('basketLayoutMode', event.target.value as BasketLayoutMode)
+                  }
+                >
+                  <option value="twoColumns">左右双列</option>
+                  <option value="singleRow">单横排</option>
+                </select>
+              </label>
+              <label>
+                起始余量
+                <input
+                  type="number"
+                  min="0"
+                  value={config.initialPoolPacks ?? ''}
+                  onChange={(event) =>
+                    updateConfig('initialPoolPacks', event.target.value ? Number(event.target.value) : '')
+                  }
+                  placeholder="如 100"
+                />
+              </label>
+              <label>
+                已出ER(本次前)
+                <input
+                  type="number"
+                  min="0"
+                  value={config.observedErCount ?? ''}
+                  onChange={(event) =>
+                    updateConfig('observedErCount', event.target.value ? Number(event.target.value) : '')
+                  }
+                  placeholder={`${recordedErCount}`}
+                />
+              </label>
+              <label>
+                几箱混
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  value={config.mixedCaseCount ?? ''}
+                  onChange={(event) =>
+                    updateConfig('mixedCaseCount', event.target.value ? Number(event.target.value) : '')
+                  }
+                  placeholder="如 1.5"
+                />
+              </label>
+            </div>
+            <div className="pool-derived">
+              <span>估算剩余：{estimatedRemainingPacks === undefined ? '-' : `${estimatedRemainingPacks}包`}</span>
+              <span className={`er-density er-density-${erDensityTone}`}>
+                剩余ER浓度：{erDensity === undefined ? '-' : erDensityLabel(estimatedRemainingErCount ?? 0, estimatedRemainingPacks)}
+              </span>
+              <span>剩余ER估计：{estimatedRemainingErCount === undefined ? '-' : estimatedRemainingErCount.toFixed(1)}</span>
+              <span>记录内ER：{recordedErCount}</span>
+            </div>
+          </section>
+
+          <details className="settings-details">
+            <summary>
+              <span>参数设置</span>
+              <small>单包价、SSR槽概率、模式等</small>
+            </summary>
+            <div className="form-grid">
+              <label>
+                单包价格
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={config.packPrice}
+                  onChange={(event) => updateConfig('packPrice', Number(event.target.value))}
+                />
+              </label>
+              <label>
+                优惠券抵扣
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={config.couponDiscount}
+                  onChange={(event) => updateConfig('couponDiscount', Number(event.target.value))}
+                />
+              </label>
+              <label>
+                准备下单包数
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={config.plannedPackCount}
+                  onChange={(event) => updateConfig('plannedPackCount', Number(event.target.value))}
+                />
+              </label>
+              <label>
+                奖励盒包数
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={config.rewardBoxPacks}
+                  onChange={(event) => updateConfig('rewardBoxPacks', Number(event.target.value))}
+                />
+              </label>
+              <label>
+                SSR槽概率
+                <select
+                  value={String(config.pSSRSlot)}
+                  onChange={(event) => updateConfig('pSSRSlot', Number(event.target.value))}
+                >
+                  <option value={String(15 / 16)}>15/16 = 93.75%</option>
+                  <option value="0.9216">官方约 92.16%</option>
+                </select>
+              </label>
+              <label>
+                渠道价目标
+                <select
+                  value={String(config.channelCostTarget)}
+                  onChange={(event) => updateConfig('channelCostTarget', Number(event.target.value))}
+                >
+                  <option value="6.5">¥6.50</option>
+                  <option value="6">¥6.00</option>
+                </select>
+              </label>
+              <label>
+                模式
+                <select
+                  value={config.mode}
+                  onChange={(event) =>
+                    updateConfig('mode', event.target.value as GameConfig['mode'])
+                  }
+                >
+                  <option value="mixedBasket">混池模式</option>
+                  <option value="singleBoxSequential">单盒连续模式</option>
+                </select>
+              </label>
+              <label>
+                ER位置假设
+                <select
+                  value={config.erPosition}
+                  onChange={(event) =>
+                    updateConfig('erPosition', event.target.value as GameConfig['erPosition'])
+                  }
+                >
+                  <option value="unknown">不确定</option>
+                  <option value="thinSlot">薄卡位</option>
+                  <option value="thickSlot">厚卡位</option>
+                </select>
+              </label>
+            </div>
+          </details>
 
           <div className="notice-list">
             {result.warnings.map((warning) => (
@@ -390,11 +557,19 @@ function App() {
           <div className="section-heading">
             <div>
               <h2>连续录入</h2>
-              <p>一行是一包，金银会合并到同一个角色概率里。</p>
+              <p>一行是一包；默认新增一单，如一单多包就用“本单+N”。当前单号 {currentOrderId || 1}。</p>
+              <p className="layout-hint">
+                {isSingleRowLayout
+                  ? '当前是单横排：左/右代表从哪边开始数，同一排共享序号。'
+                  : '当前是左右双列：左/右是两条独立队列。'}
+              </p>
             </div>
             <div className="button-row">
-              <button type="button" onClick={addRecord}>新增一行</button>
-              <button type="button" onClick={() => addRecords(10)}>新增10行</button>
+              <button type="button" onClick={addOrder}>新增一单</button>
+              <button type="button" onClick={() => addRecordsToCurrentOrder(1)}>本单+1</button>
+              <button type="button" onClick={() => addRecordsToCurrentOrder(3)}>本单+3</button>
+              <button type="button" onClick={() => addRecordsToCurrentOrder(5)}>本单+5</button>
+              <button type="button" onClick={() => addRecordsToCurrentOrder(10)}>本单+10</button>
               <button type="button" onClick={saveCurrentSession}>保存本次</button>
               <button type="button" onClick={exportCsv}>导出CSV</button>
               <button type="button" onClick={resetDemo}>载入示例</button>
@@ -441,26 +616,66 @@ function App() {
               <thead>
                 <tr>
                   <th>序号</th>
+                  <th>单号</th>
+                  <th>{isSingleRowLayout ? '数向' : '边'}</th>
+                  <th>{isSingleRowLayout ? '排位' : '侧位'}</th>
                   <th>SSR角色</th>
                   <th>金/银</th>
                   <th>UR角色</th>
                   <th>QTR</th>
                   <th>ER</th>
                   <th>SP</th>
+                  {isSingleRowLayout ? (
+                    <th>整排抽前总</th>
+                  ) : (
+                    <>
+                      <th>左抽前总</th>
+                      <th>右抽前总</th>
+                    </>
+                  )}
                   <th>备注</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
                 {pagedRecords.map((record) => (
-                  <tr key={record.id}>
+                  <tr className={!record.ssrRole ? 'pending-row' : undefined} key={record.id}>
+                    <td className="readonly-cell">
+                      #{record.sequence}
+                    </td>
                     <td>
                       <input
                         type="number"
-                        value={record.sequence}
+                        min="1"
+                        value={record.orderId ?? record.sequence}
                         onChange={(event) =>
-                          updateRecord(record.id, { sequence: Number(event.target.value) })
+                          updateRecord(record.id, { orderId: Number(event.target.value) || undefined })
                         }
+                      />
+                    </td>
+                    <td>
+                      <select
+                        value={record.side ?? ''}
+                        onChange={(event) =>
+                          updateRecord(record.id, { side: event.target.value as BasketSide })
+                        }
+                      >
+                        <option value="">未记</option>
+                        <option value="left">{isSingleRowLayout ? '从左数' : '左'}</option>
+                        <option value="right">{isSingleRowLayout ? '从右数' : '右'}</option>
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        type="number"
+                        min="1"
+                        value={record.sidePosition ?? ''}
+                        onChange={(event) =>
+                          updateRecord(record.id, {
+                            sidePosition: event.target.value ? Number(event.target.value) : '',
+                          })
+                        }
+                        placeholder={isSingleRowLayout ? '第几包' : '几'}
                       />
                     </td>
                     <td>
@@ -527,7 +742,48 @@ function App() {
                         onChange={(event) => updateRecord(record.id, { spHit: event.target.checked })}
                       />
                     </td>
-                    <td>
+                    {isSingleRowLayout ? (
+                      <td className="total-cell">
+                        <input
+                          type="number"
+                          min="0"
+                          value={record.rowTotalBefore ?? ''}
+                          onChange={(event) =>
+                            updateRecord(record.id, {
+                              rowTotalBefore: event.target.value ? Number(event.target.value) : '',
+                            })
+                          }
+                        />
+                      </td>
+                    ) : (
+                      <>
+                        <td className="total-cell">
+                          <input
+                            type="number"
+                            min="0"
+                            value={record.leftTotalBefore ?? ''}
+                            onChange={(event) =>
+                              updateRecord(record.id, {
+                                leftTotalBefore: event.target.value ? Number(event.target.value) : '',
+                              })
+                            }
+                          />
+                        </td>
+                        <td className="total-cell">
+                          <input
+                            type="number"
+                            min="0"
+                            value={record.rightTotalBefore ?? ''}
+                            onChange={(event) =>
+                              updateRecord(record.id, {
+                                rightTotalBefore: event.target.value ? Number(event.target.value) : '',
+                              })
+                            }
+                          />
+                        </td>
+                      </>
+                    )}
+                    <td className="note-cell">
                       <input
                         type="text"
                         value={record.note}
@@ -544,7 +800,7 @@ function App() {
                 ))}
                 {records.length === 0 && (
                   <tr>
-                    <td colSpan={9} className="empty-cell">暂无记录，点“新增一行”开始录入。</td>
+                    <td colSpan={recordTableColSpan} className="empty-cell">暂无记录，点“新增一单”开始录入。</td>
                   </tr>
                 )}
               </tbody>
@@ -555,7 +811,7 @@ function App() {
             <textarea
               value={csvText}
               onChange={(event) => setCsvText(event.target.value)}
-              placeholder="可粘贴CSV：sequence,ssrRole,ssrVariant,urRole,qtrId,erHit,spHit,note"
+              placeholder="可粘贴CSV：sequence,orderId,side,sidePosition,ssrRole,ssrVariant,urRole,qtrId,erHit,spHit,leftTotalBefore,rightTotalBefore,rowTotalBefore,note"
             />
             <button type="button" onClick={importCsv}>导入粘贴内容</button>
           </div>
@@ -567,8 +823,17 @@ function App() {
           <div className="section-heading">
             <div>
               <h2>Top候选</h2>
-              <p>{result.qtrContinuity.detail}</p>
+              <p>{result.configuration.detail}；{result.qtrContinuity.detail}</p>
             </div>
+          </div>
+          <div className="configuration-summary">
+            <span>配置置信度 {percent(result.configuration.score)}</span>
+            <span>
+              疑似角色组：
+              {result.configuration.suspectedRoleIds.length > 0
+                ? result.configuration.suspectedRoleIds.map((roleId) => roleLabel(roleId)).join('、')
+                : '-'}
+            </span>
           </div>
           <div className="top-list">
             {result.topRows.map((row) => (
@@ -603,15 +868,87 @@ function App() {
               盒
             </label>
           </div>
+          <div className="buy-context-grid">
+            <label>
+              试算包数
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={config.customBuyCount ?? ''}
+                onChange={(event) =>
+                  updateConfig('customBuyCount', event.target.value ? Number(event.target.value) : '')
+                }
+                placeholder="如 7"
+              />
+            </label>
+            <label>
+              已买包数
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={config.priorPackCount ?? ''}
+                onChange={(event) =>
+                  updateConfig('priorPackCount', event.target.value ? Number(event.target.value) : '')
+                }
+                placeholder="如 17"
+              />
+            </label>
+            <label>
+              已中盒数
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={config.priorHitCount ?? ''}
+                onChange={(event) =>
+                  updateConfig('priorHitCount', event.target.value ? Number(event.target.value) : '')
+                }
+                placeholder="如 0"
+              />
+            </label>
+            <label>
+              已花金额
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={config.priorSpend ?? ''}
+                onChange={(event) =>
+                  updateConfig('priorSpend', event.target.value ? Number(event.target.value) : '')
+                }
+                placeholder="不填则估算"
+              />
+            </label>
+          </div>
+          <div className="buy-summary">
+            <span>当前实付：{priorPackCount > 0 ? money(priorSpend) : '-'}</span>
+            <span>当前成本：{currentActualCost === undefined ? '-' : `${money(currentActualCost)}/包`}</span>
+            <span>目标价：{money(config.channelCostTarget)}/包</span>
+          </div>
           <div className="buy-grid">
             {buyCounts.map((count) => {
               const p = top
                 ? calculateAtLeastKHitProbability(top.pHit, count, targetHitCount)
                 : 0
+              const totalSpend = priorSpend + count * result.actualPrice
+              const noHitEffectivePacks = priorEffectivePacks + count
+              const hitEffectivePacks =
+                priorEffectivePacks + count + targetHitCount * config.rewardBoxPacks
+              const noHitCost =
+                noHitEffectivePacks > 0 ? totalSpend / noHitEffectivePacks : undefined
+              const hitCost = hitEffectivePacks > 0 ? totalSpend / hitEffectivePacks : undefined
               return (
                 <div className="buy-row" key={count}>
                   <span>买 {count} 包</span>
                   <strong>{percent(p)}</strong>
+                  <em className={noHitCost && noHitCost <= config.channelCostTarget ? 'positive' : ''}>
+                    未中 {noHitCost === undefined ? '-' : money(noHitCost)}
+                  </em>
+                  <em className={hitCost && hitCost <= config.channelCostTarget ? 'positive' : ''}>
+                    中后 {hitCost === undefined ? '-' : money(hitCost)}
+                  </em>
                   <div className="bar"><i style={{ width: `${Math.min(100, p * 100)}%` }} /></div>
                 </div>
               )
@@ -621,6 +958,49 @@ function App() {
       </section>
 
       <section className="probability-panel">
+        <div className="side-frequency-grid">
+          {sideGroups.map(({ side, label, shortLabel }) => {
+            const sideSsrTotal = records.filter(
+              (record) => record.side === side && record.ssrRole,
+            ).length
+            const maxSideRoleCount = Math.max(
+              1,
+              ...ROLES.map(
+                (role) =>
+                  records.filter((record) => record.side === side && record.ssrRole === role.id)
+                    .length,
+              ),
+            )
+
+            return (
+              <section className="side-frequency-card" key={side}>
+                <div className="section-heading compact-heading">
+                  <div>
+                    <h2>{label}SSR角色占比</h2>
+                    <p>只统计已填写“{shortLabel}”的记录，共 {sideSsrTotal} 张SSR。</p>
+                  </div>
+                </div>
+                <div className="frequency-list compact-frequency-list">
+                  {ROLES.map((role) => {
+                    const count = records.filter(
+                      (record) => record.side === side && record.ssrRole === role.id,
+                    ).length
+                    const share = sideSsrTotal > 0 ? count / sideSsrTotal : 0
+                    return (
+                      <div className="frequency-row" key={role.id}>
+                        <span>{role.id}</span>
+                        <b>{role.name}</b>
+                        <div className="bar"><i style={{ width: `${(count / maxSideRoleCount) * 100}%` }} /></div>
+                        <em>{percent(share)}</em>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            )
+          })}
+        </div>
+
         <div className="section-heading">
           <div>
             <h2>全部角色概率表</h2>
@@ -662,36 +1042,6 @@ function App() {
               ))}
             </tbody>
           </table>
-        </div>
-      </section>
-
-      <section className="chart-panel">
-        <div className="section-heading">
-          <div>
-            <h2>最近50包SSR频率</h2>
-            <p>只看角色，不区分金银。</p>
-          </div>
-        </div>
-        <div className="frequency-list">
-          {ROLES.map((role) => {
-            const recent = records
-              .slice()
-              .sort((a, b) => b.sequence - a.sequence)
-              .slice(0, 50)
-            const count = recent.filter((record) => record.ssrRole === role.id).length
-            const max = Math.max(
-              1,
-              ...ROLES.map((item) => recent.filter((record) => record.ssrRole === item.id).length),
-            )
-            return (
-              <div className="frequency-row" key={role.id}>
-                <span>{role.id}</span>
-                <b>{role.name}</b>
-                <div className="bar"><i style={{ width: `${(count / max) * 100}%` }} /></div>
-                <em>{count}</em>
-              </div>
-            )
-          })}
         </div>
       </section>
 

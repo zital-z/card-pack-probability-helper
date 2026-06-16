@@ -20,16 +20,24 @@ export type RoleId =
   | '19'
 
 export type CardVariant = '' | 'gold' | 'silver' | 'unknown'
+export type BasketSide = '' | 'left' | 'right'
+export type BasketLayoutMode = 'twoColumns' | 'singleRow'
 
 export type PackRecord = {
   id: string
   sequence: number
+  orderId?: number
+  side?: BasketSide
+  sidePosition?: number | ''
   ssrRole?: RoleId | ''
   ssrVariant?: CardVariant
   urRole?: RoleId | ''
   qtrId?: string
   erHit: boolean
   spHit: boolean
+  leftTotalBefore?: number | ''
+  rightTotalBefore?: number | ''
+  rowTotalBefore?: number | ''
   note?: string
 }
 
@@ -41,7 +49,15 @@ export type GameConfig = {
   pSSRSlot: number
   channelCostTarget: number
   mode: 'mixedBasket' | 'singleBoxSequential'
+  basketLayoutMode: BasketLayoutMode
   erPosition: 'thinSlot' | 'thickSlot' | 'unknown'
+  initialPoolPacks?: number | ''
+  observedErCount?: number | ''
+  mixedCaseCount?: number | ''
+  priorPackCount?: number | ''
+  priorHitCount?: number | ''
+  priorSpend?: number | ''
+  customBuyCount?: number | ''
 }
 
 export type RoleInfo = {
@@ -53,6 +69,14 @@ export type QtrContinuity = {
   score: number
   label: '连续' | '不确定' | '疑似换池'
   detail: string
+}
+
+export type ConfigurationSignal = {
+  score: number
+  label: '低' | '中' | '高'
+  detail: string
+  matchedSampleTitle?: string
+  suspectedRoleIds: RoleId[]
 }
 
 export type RoleProbability = {
@@ -75,6 +99,7 @@ export type CalculationResult = {
   actualPrice: number
   observedSSRSlotRate: number
   qtrContinuity: QtrContinuity
+  configuration: ConfigurationSignal
   confidence: 'low' | 'medium' | 'high'
   warnings: string[]
 }

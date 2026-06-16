@@ -1,6 +1,8 @@
+import { BOX_SAMPLES } from '../data/boxSamples'
 import { ROLES } from '../data/roles'
 import type {
   CalculationResult,
+  ConfigurationSignal,
   GameConfig,
   PackRecord,
   QtrContinuity,
@@ -9,6 +11,10 @@ import type {
 } from '../types'
 
 const alpha = 1
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value))
+}
 
 export function getActualPrice(config: GameConfig) {
   const count = Math.max(1, config.plannedPackCount)
@@ -67,6 +73,10 @@ function sortedRecords(records: PackRecord[]) {
   return [...records].sort((a, b) => a.sequence - b.sequence)
 }
 
+function sortedSSRRecords(records: PackRecord[]) {
+  return sortedRecords(records).filter((record) => record.ssrRole)
+}
+
 export function calculateWeightedSSRCounts(records: PackRecord[], continuity = 0.75) {
   const counts = emptyRoleMap()
   const ordered = sortedRecords(records)
@@ -94,6 +104,176 @@ export function calculateWeightedURCounts(records: PackRecord[]) {
   }
 
   return counts
+}
+
+function calculateObservedSSRCounts(records: PackRecord[]) {
+  const counts = emptyRoleMap()
+  for (const record of records) {
+    if (record.ssrRole) counts[record.ssrRole] += 1
+  }
+  return counts
+}
+
+function countsFromRoles(roles: RoleId[]) {
+  const counts = emptyRoleMap()
+  for (const roleId of roles) {
+    counts[roleId] += 1
+  }
+  return counts
+}
+
+function sampleRoleSet(roles: RoleId[]) {
+  return new Set(roles)
+}
+
+const boxSampleStats = (() => {
+  const presentBoxes = emptyRoleMap()
+  const duplicateBoxes = emptyRoleMap()
+  const totalAppearances = emptyRoleMap()
+
+  for (const sample of BOX_SAMPLES) {
+    const counts = countsFromRoles(sample.roles)
+    for (const role of ROLES) {
+      const count = counts[role.id]
+      if (count > 0) presentBoxes[role.id] += 1
+      if (count >= 2) duplicateBoxes[role.id] += 1
+      totalAppearances[role.id] += count
+    }
+  }
+
+  return {
+    boxCount: BOX_SAMPLES.length,
+    presentBoxes,
+    duplicateBoxes,
+    totalAppearances,
+  }
+})()
+
+function calculateWindowCounts(records: PackRecord[], windowSize: number) {
+  const counts = emptyRoleMap()
+  const ssrRecords = sortedSSRRecords(records).slice(-windowSize)
+  for (const record of ssrRecords) {
+    if (record.ssrRole) counts[record.ssrRole] += 1
+  }
+  return counts
+}
+
+function topRoleSet(counts: Record<RoleId, number>, limit: number) {
+  return new Set(
+    ROLES.map((role) => role.id)
+      .sort((a, b) => counts[b] - counts[a])
+      .filter((roleId) => counts[roleId] > 0)
+      .slice(0, limit),
+  )
+}
+
+function calculateConfigurationSignal(records: PackRecord[]): ConfigurationSignal {
+  const ssrRecords = sortedSSRRecords(records)
+  const observedSSR = calculateObservedSSRCounts(ssrRecords)
+  const observedSSRTotal = Object.values(observedSSR).reduce((sum, value) => sum + value, 0)
+  const activeRoleIds = ROLES.map((role) => role.id).filter((roleId) => observedSSR[roleId] > 0)
+
+  if (observedSSRTotal < 8 || activeRoleIds.length < 4) {
+    return {
+      score: 0.15,
+      label: '低',
+      detail: '样本太少，暂时更接近盲选模型',
+      suspectedRoleIds: activeRoleIds.slice(0, 6),
+    }
+  }
+
+  const duplicateExcess = Object.values(observedSSR).reduce(
+    (sum, value) => sum + Math.max(0, value - 1),
+    0,
+  )
+  const duplicateRatio = duplicateExcess / observedSSRTotal
+  const sampleMatches = BOX_SAMPLES.map((sample) => {
+    const set = sampleRoleSet(sample.roles)
+    const overlap = activeRoleIds.filter((roleId) => set.has(roleId)).length
+    const observedCoverage = overlap / Math.max(1, activeRoleIds.length)
+    const sampleCoverage = overlap / Math.max(1, set.size)
+    return {
+      sample,
+      overlap,
+      score: observedCoverage * 0.7 + sampleCoverage * 0.3,
+    }
+  }).sort((a, b) => b.score - a.score)
+
+  const bestMatch = sampleMatches[0]
+  const sampleMatchScore = bestMatch?.score ?? 0
+  const sampleSizeFactor = clamp((observedSSRTotal - 6) / 34, 0.15, 1)
+  const repeatedRoleCount = ROLES.filter((role) => observedSSR[role.id] >= 2).length
+  const repeatStructureScore = clamp(duplicateRatio * 2.2 + repeatedRoleCount * 0.04, 0, 1)
+  const score = clamp(
+    (sampleMatchScore * 0.55 + repeatStructureScore * 0.45) * sampleSizeFactor,
+    0,
+    1,
+  )
+  const label: ConfigurationSignal['label'] = score >= 0.68 ? '高' : score >= 0.38 ? '中' : '低'
+  const suspectedFromSample =
+    bestMatch && bestMatch.score >= 0.35
+      ? [...sampleRoleSet(bestMatch.sample.roles)]
+      : []
+  const suspectedRoleIds = ROLES.map((role) => role.id)
+    .filter((roleId) => observedSSR[roleId] > 0 || suspectedFromSample.includes(roleId))
+    .sort((a, b) => {
+      const aScore =
+        observedSSR[a] * 3 +
+        (suspectedFromSample.includes(a) ? 1 : 0) +
+        boxSampleStats.duplicateBoxes[a] * 0.5
+      const bScore =
+        observedSSR[b] * 3 +
+        (suspectedFromSample.includes(b) ? 1 : 0) +
+        boxSampleStats.duplicateBoxes[b] * 0.5
+      return bScore - aScore
+    })
+    .slice(0, 9)
+
+  const detail =
+    label === '低'
+      ? `配置感偏弱，当前更接近混池盲选；整盒样本最佳匹配为 ${bestMatch.sample.title}`
+      : `配置感${label}，当前记录和 ${bestMatch.sample.title} 的角色组重合度最高`
+
+  return {
+    score,
+    label,
+    detail,
+    matchedSampleTitle: bestMatch.sample.title,
+    suspectedRoleIds,
+  }
+}
+
+function detectDistributionShift(records: PackRecord[]) {
+  const ssrRecords = sortedSSRRecords(records)
+  if (ssrRecords.length < 45) {
+    return { score: 0, label: '样本不足，未启用换池检测' }
+  }
+
+  const recent = ssrRecords.slice(-20)
+  const previous = ssrRecords.slice(Math.max(0, ssrRecords.length - 60), -20)
+  if (recent.length < 15 || previous.length < 20) {
+    return { score: 0, label: '样本不足，未启用换池检测' }
+  }
+
+  const recentCounts = calculateObservedSSRCounts(recent)
+  const previousCounts = calculateObservedSSRCounts(previous)
+  const recentTop = topRoleSet(recentCounts, 6)
+  const previousTop = topRoleSet(previousCounts, 6)
+  const overlap = [...recentTop].filter((roleId) => previousTop.has(roleId)).length
+  const overlapRatio = recentTop.size > 0 ? overlap / recentTop.size : 1
+  const newClusterCount = ROLES.filter(
+    (role) => recentCounts[role.id] >= 2 && previousCounts[role.id] <= 1,
+  ).length
+
+  let score = 0
+  if (overlapRatio < 0.35) score = 1
+  else if (overlapRatio < 0.55) score = 0.6
+  if (newClusterCount >= 2) score = Math.max(score, 0.75)
+  if (newClusterCount >= 3) score = Math.max(score, 1)
+
+  if (score >= 0.9) return { score, label: '检测到明显分布切换，旧数据快速降权' }
+  if (score >= 0.5) return { score, label: '检测到轻微分布切换，旧数据降权' }
+  return { score, label: '未检测到明显分布切换' }
 }
 
 function qtrNumber(qtrId?: string) {
@@ -135,14 +315,6 @@ export function calculateQTRContinuity(records: PackRecord[]): QtrContinuity {
   return { score: 0.75, label: '不确定', detail: `最近QTR顺序为 ${qtrs.join(' → ')}，暂时按中性处理` }
 }
 
-function recentRoleCount(records: PackRecord[], roleId: RoleId, windowSize: number) {
-  const ordered = sortedRecords(records)
-  const maxSequence = Math.max(0, ...ordered.map((record) => record.sequence))
-  return ordered.filter(
-    (record) => record.ssrRole === roleId && maxSequence - record.sequence < windowSize,
-  ).length
-}
-
 function hasVariantPair(records: PackRecord[], roleId: RoleId) {
   const variants = new Set(
     records
@@ -153,9 +325,24 @@ function hasVariantPair(records: PackRecord[], roleId: RoleId) {
   return variants.has('gold') && variants.has('silver')
 }
 
-export function calculateRoleScores(records: PackRecord[], config: GameConfig, qtr: QtrContinuity) {
-  const weightedSSR = calculateWeightedSSRCounts(records, qtr.score)
-  const weightedUR = calculateWeightedURCounts(records)
+export function calculateRoleScores(
+  records: PackRecord[],
+  config: GameConfig,
+  qtr: QtrContinuity,
+  configuration: ConfigurationSignal,
+) {
+  const observedSSR = calculateObservedSSRCounts(records)
+  const recent10Counts = calculateWindowCounts(records, 10)
+  const recent30Counts = calculateWindowCounts(records, 30)
+  const shift = detectDistributionShift(records)
+  const observedSSRTotal = Object.values(observedSSR).reduce((sum, value) => sum + value, 0)
+  const activeRoleCount = Math.max(1, ROLES.filter((role) => observedSSR[role.id] > 0).length)
+  const expectedPerActiveRole = observedSSRTotal / activeRoleCount
+  const finitePoolFactor = clamp((observedSSRTotal - 35) / 65, 0, 1)
+  const oldDataMultiplier = 1 - shift.score * 0.7
+  const configScore = configuration.score
+  const matchedSample = BOX_SAMPLES.find((sample) => sample.title === configuration.matchedSampleTitle)
+  const matchedSampleRoles = matchedSample ? sampleRoleSet(matchedSample.roles) : new Set<RoleId>()
   const scores = emptyRoleMap(alpha)
   const reasons = Object.fromEntries(ROLES.map((role) => [role.id, [] as string[]])) as Record<
     RoleId,
@@ -163,26 +350,81 @@ export function calculateRoleScores(records: PackRecord[], config: GameConfig, q
   >
 
   for (const role of ROLES) {
-    const recent10 = recentRoleCount(records, role.id, 10)
-    const recent20 = recentRoleCount(records, role.id, 20)
-    const ssrScore = weightedSSR[role.id]
-    const urScore = weightedUR[role.id]
-    const streakBonus = recent20 >= 2 ? Math.min(1.5, recent20 * 0.35) : 0
-    const pairBonus = hasVariantPair(records, role.id) ? 0.35 : 0
+    const recent10 = recent10Counts[role.id]
+    const recent30 = recent30Counts[role.id]
+    const recent11To30 = Math.max(0, recent30 - recent10)
+    const observedCount = observedSSR[role.id]
+    const wholePoolScore = observedCount * (0.9 + configScore * 0.85)
+    const recentActivityBonus = Math.min(1, recent10 * 0.16 + recent11To30 * 0.06)
+    const streakBonus = recent30 >= 2 ? Math.min(0.45, recent30 * 0.08) : 0
+    const pairBonus = hasVariantPair(records, role.id) ? 0.2 : 0
+    const samplePresenceRate = boxSampleStats.presentBoxes[role.id] / boxSampleStats.boxCount
+    const sampleDuplicateRate = boxSampleStats.duplicateBoxes[role.id] / boxSampleStats.boxCount
+    const matchedSampleBonus =
+      matchedSampleRoles.has(role.id) && observedSSRTotal >= 8 ? configScore * 0.35 : 0
+    const sampleDuplicateBonus =
+      observedCount > 0 && sampleDuplicateRate > 0
+        ? configScore * Math.min(0.9, sampleDuplicateRate * 1.45)
+        : 0
+    const setPresenceBonus = observedCount > 0 ? configScore * 0.45 + finitePoolFactor * 0.25 : 0
+    const oldPresenceBonus =
+      observedCount > 0 && recent30 === 0 ? finitePoolFactor * oldDataMultiplier * 0.15 : 0
+    const overdrawn = Math.max(0, observedCount - expectedPerActiveRole)
+    const underdrawn = observedCount > 0 ? Math.max(0, expectedPerActiveRole - observedCount) : 0
+    const priorProtected = sampleDuplicateRate >= 0.25 || matchedSampleRoles.has(role.id)
+    const sustainedHot = overdrawn >= 1 && recent30 >= 2 && (recent10 >= 1 || priorProtected)
+    const staleHot = overdrawn >= 1 && recent30 <= 1
+    const depletionRate = sustainedHot || priorProtected ? 0.18 : staleHot ? 0.7 : 0.42
+    const depletionPenalty = finitePoolFactor * Math.min(4.5, overdrawn * depletionRate)
+    const sustainedHotBonus = sustainedHot ? configScore * Math.min(0.75, recent30 * 0.12) : 0
+    const recentLowFrequency = observedCount > 0 && underdrawn > 0 && recent30 > 0
+    const emergingRoleBonus =
+      recentLowFrequency
+        ? configScore * Math.min(1.4, underdrawn * 0.24 + recent10 * 0.16 + recent11To30 * 0.08)
+        : 0
+    const underdrawnBonus =
+      observedCount > 0 && recent30 === 0 ? finitePoolFactor * Math.min(0.45, underdrawn * 0.08) : 0
     const modeMultiplier =
-      config.mode === 'singleBoxSequential' && recent10 >= 2 ? 0.92 : 1
+      config.mode === 'singleBoxSequential' && recent10 >= 2 ? 0.96 : 1
 
-    scores[role.id] = (alpha + ssrScore + urScore + streakBonus + pairBonus) * modeMultiplier
+    const rawScore =
+      Math.max(
+        0.2,
+        alpha +
+          wholePoolScore +
+          recentActivityBonus +
+          setPresenceBonus +
+          oldPresenceBonus +
+          streakBonus +
+          pairBonus +
+          matchedSampleBonus +
+          sampleDuplicateBonus +
+          sustainedHotBonus +
+          emergingRoleBonus +
+          underdrawnBonus -
+          depletionPenalty,
+      ) * modeMultiplier
+    const blindScore = alpha + samplePresenceRate * 0.08
+    const blendToBlind = 1 - configScore * 0.72
+    scores[role.id] = rawScore * (1 - blendToBlind) + blindScore * blendToBlind
 
-    if (recent10 > 0) reasons[role.id].push(`最近10包SSR ${recent10}次`)
-    if (recent20 >= 2) reasons[role.id].push(`最近20包重复出现`)
-    if (urScore > 0) reasons[role.id].push(`近期UR强信号`)
+    if (observedCount > 0) reasons[role.id].push(`本次累计SSR ${observedCount}次`)
+    if (recent10 > 0) reasons[role.id].push(`最近10包仍有${recent10}次，作为活跃修正`)
+    if (recent11To30 > 0) reasons[role.id].push(`最近11-30包有${recent11To30}次`)
+    if (recent30 >= 2) reasons[role.id].push(`本次窗口重复出现`)
     if (pairBonus > 0) reasons[role.id].push(`金银配对弱信号`)
-    if (qtr.score >= 1 && ssrScore > 0) reasons[role.id].push(`QTR连续，近期记录可信度较高`)
+    if (matchedSampleBonus > 0) reasons[role.id].push(`落在疑似配置组`)
+    if (sampleDuplicateBonus > 0) reasons[role.id].push(`整盒样本中有复数卡位先验`)
+    if (finitePoolFactor > 0 && sustainedHot) reasons[role.id].push('累计偏高但近期仍活跃，保留热度')
+    else if (finitePoolFactor > 0 && overdrawn >= 1) reasons[role.id].push('已抽出偏多，做消耗下修')
+    if (finitePoolFactor > 0 && recentLowFrequency) reasons[role.id].push('低频入池且近期出现，剩余潜力上修')
+    if (finitePoolFactor > 0 && underdrawn >= 1) reasons[role.id].push('已在池内且抽出偏少')
+    if (shift.score > 0 && recent30 === 0 && observedCount > 0) reasons[role.id].push('疑似换池，旧窗口信号降权')
+    if (qtr.score >= 1 && recent30 > 0) reasons[role.id].push(`QTR连续，近期记录可信度较高`)
     if (reasons[role.id].length === 0) reasons[role.id].push('主要来自均匀先验')
   }
 
-  return { scores, reasons }
+  return { scores, reasons, shift }
 }
 
 export function normalizeScoresToProbabilities(scores: Record<RoleId, number>) {
@@ -200,15 +442,25 @@ function recommendationLevel(pHit: number): RoleProbability['level'] {
   return '观望'
 }
 
-function calculateConfidence(records: PackRecord[], qtr: QtrContinuity): CalculationResult['confidence'] {
+function calculateConfidence(
+  records: PackRecord[],
+  qtr: QtrContinuity,
+  configuration: ConfigurationSignal,
+): CalculationResult['confidence'] {
   if (records.length < 20) return 'low'
-  if (records.length >= 50 && qtr.score >= 0.75) return 'high'
+  if (records.length >= 50 && qtr.score >= 0.75 && configuration.score >= 0.5) return 'high'
   return qtr.score < 0.75 ? 'low' : 'medium'
 }
 
 export function calculateProbabilities(records: PackRecord[], config: GameConfig): CalculationResult {
   const qtrContinuity = calculateQTRContinuity(records)
-  const { scores, reasons } = calculateRoleScores(records, config, qtrContinuity)
+  const configuration = calculateConfigurationSignal(records)
+  const { scores, reasons, shift } = calculateRoleScores(
+    records,
+    config,
+    qtrContinuity,
+    configuration,
+  )
   const probabilities = normalizeScoresToProbabilities(scores)
   const blindHitRate = config.pSSRSlot / ROLES.length
   const actualPrice = getActualPrice(config)
@@ -238,7 +490,10 @@ export function calculateProbabilities(records: PackRecord[], config: GameConfig
 
   const warnings: string[] = ['估算值，不是官方概率；模型用于辅助观察，不保证盈利。']
   if (records.length < 20) warnings.push('样本不足，结果会明显回归盲选概率。')
+  if (configuration.score < 0.38) warnings.push('配置感偏弱，角色概率已向盲选回归。')
   if (qtrContinuity.score < 0.75) warnings.push('QTR信号疑似断层，旧数据权重已下降。')
+  if (shift.score >= 0.5) warnings.push(shift.label)
+  if (records.some((record) => record.urRole)) warnings.push('UR记录不参与SSR角色概率排序，仅作为高价值结果记录。')
   if (rows[0]?.pHit < 0.0519) warnings.push('Top1仍低于优于6.5元渠道价的大致阈值，仅建议娱乐观察。')
 
   return {
@@ -248,7 +503,8 @@ export function calculateProbabilities(records: PackRecord[], config: GameConfig
     actualPrice,
     observedSSRSlotRate,
     qtrContinuity,
-    confidence: calculateConfidence(records, qtrContinuity),
+    configuration,
+    confidence: calculateConfidence(records, qtrContinuity, configuration),
     warnings,
   }
 }

@@ -1,4 +1,4 @@
-import type { CardVariant, PackRecord, RoleId } from '../types'
+import type { BasketSide, CardVariant, PackRecord, RoleId } from '../types'
 
 const ROLE_IDS = new Set(
   Array.from({ length: 19 }, (_, index) => String(index + 1).padStart(2, '0')),
@@ -23,6 +23,21 @@ function cleanVariant(value?: string): CardVariant {
 function cleanBool(value?: string) {
   const trimmed = value?.trim().toLowerCase()
   return trimmed === '1' || trimmed === 'true' || trimmed === 'yes' || trimmed === 'y' || trimmed === '是'
+}
+
+function cleanSide(value?: string): BasketSide {
+  const trimmed = value?.trim().toLowerCase()
+  if (!trimmed) return ''
+  if (trimmed === 'left' || trimmed === 'l' || trimmed === '左' || trimmed === '从左数') return 'left'
+  if (trimmed === 'right' || trimmed === 'r' || trimmed === '右' || trimmed === '从右数') return 'right'
+  return ''
+}
+
+function cleanNumber(value?: string): number | '' {
+  const trimmed = value?.trim()
+  if (!trimmed) return ''
+  const number = Number(trimmed)
+  return Number.isFinite(number) ? number : ''
 }
 
 function splitCsvLine(line: string) {
@@ -59,7 +74,22 @@ export function parseCsvRecords(text: string, startingSequence = 1): PackRecord[
   const hasHeader = firstCells.some((cell) => /sequence|ssrRole|urRole|qtrId/i.test(cell))
   const headers = hasHeader
     ? firstCells
-    : ['sequence', 'ssrRole', 'ssrVariant', 'urRole', 'qtrId', 'erHit', 'spHit', 'note']
+    : [
+        'sequence',
+        'orderId',
+        'side',
+        'sidePosition',
+        'ssrRole',
+        'ssrVariant',
+        'urRole',
+        'qtrId',
+        'erHit',
+        'spHit',
+        'leftTotalBefore',
+        'rightTotalBefore',
+        'rowTotalBefore',
+        'note',
+      ]
   const dataLines = hasHeader ? lines.slice(1) : lines
 
   return dataLines.map((line, index) => {
@@ -70,12 +100,18 @@ export function parseCsvRecords(text: string, startingSequence = 1): PackRecord[
     return {
       id: crypto.randomUUID(),
       sequence,
+      orderId: Number(values.orderId ?? values['单号']) || sequence,
+      side: cleanSide(values.side ?? values['边']),
+      sidePosition: cleanNumber(values.sidePosition ?? values['侧位']),
       ssrRole: cleanRole(values.ssrRole ?? values.ssr ?? values['SSR角色']),
       ssrVariant: cleanVariant(values.ssrVariant ?? values.variant ?? values['金银']),
       urRole: cleanRole(values.urRole ?? values.ur ?? values['UR角色']),
       qtrId: (values.qtrId ?? values.qtr ?? values['QTR编号'] ?? '').trim(),
       erHit: cleanBool(values.erHit ?? values.er ?? values.ER),
       spHit: cleanBool(values.spHit ?? values.sp ?? values.SP),
+      leftTotalBefore: cleanNumber(values.leftTotalBefore ?? values['左抽前总']),
+      rightTotalBefore: cleanNumber(values.rightTotalBefore ?? values['右抽前总']),
+      rowTotalBefore: cleanNumber(values.rowTotalBefore ?? values['整排抽前总']),
       note: (values.note ?? values['备注'] ?? '').trim(),
     }
   })
@@ -89,16 +125,37 @@ function escapeCell(value: unknown) {
 }
 
 export function recordsToCsv(records: PackRecord[]) {
-  const headers = ['sequence', 'ssrRole', 'ssrVariant', 'urRole', 'qtrId', 'erHit', 'spHit', 'note']
+  const headers = [
+    'sequence',
+    'orderId',
+    'side',
+    'sidePosition',
+    'ssrRole',
+    'ssrVariant',
+    'urRole',
+    'qtrId',
+    'erHit',
+    'spHit',
+    'leftTotalBefore',
+    'rightTotalBefore',
+    'rowTotalBefore',
+    'note',
+  ]
   const lines = records.map((record) =>
     [
       record.sequence,
+      record.orderId,
+      record.side,
+      record.sidePosition,
       record.ssrRole,
       record.ssrVariant,
       record.urRole,
       record.qtrId,
       record.erHit ? '1' : '',
       record.spHit ? '1' : '',
+      record.leftTotalBefore,
+      record.rightTotalBefore,
+      record.rowTotalBefore,
       record.note,
     ]
       .map(escapeCell)
