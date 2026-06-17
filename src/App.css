@@ -431,7 +431,7 @@ table {
 }
 
 .record-table table {
-  min-width: 1220px;
+  min-width: 1140px;
 }
 
 th,
@@ -462,6 +462,15 @@ td {
 .pending-row input,
 .pending-row select {
   background: #fffafb;
+}
+
+.high-value-row td {
+  background: #fff6dd;
+}
+
+.high-value-row input,
+.high-value-row select {
+  background: #fffdf6;
 }
 
 .record-table input,
@@ -512,8 +521,12 @@ td {
 
 .top-list {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
+}
+
+.top-panel-priority {
+  margin-bottom: 14px;
 }
 
 .configuration-summary {
@@ -531,6 +544,41 @@ td {
   font-weight: 800;
   line-height: 1.45;
   padding: 8px 10px;
+}
+
+.configuration-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.configuration-card {
+  background: #ffffff;
+  border: 1px solid #d8e1dd;
+  border-radius: 8px;
+  display: grid;
+  gap: 7px;
+  padding: 11px;
+}
+
+.configuration-card-heading {
+  display: grid;
+  gap: 3px;
+}
+
+.configuration-card-heading strong {
+  color: #17201f;
+  font-size: 13px;
+}
+
+.configuration-card-heading span,
+.configuration-card p {
+  color: #5e6c68;
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .top-item {
@@ -641,7 +689,7 @@ td {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 16px;
+  margin-top: 16px;
 }
 
 .side-frequency-card {
@@ -736,6 +784,14 @@ footer {
 
   .buy-context-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .top-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .configuration-groups {
+    grid-template-columns: 1fr;
   }
 
   .buy-row {

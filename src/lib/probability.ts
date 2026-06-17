@@ -158,6 +158,116 @@ function calculateWindowCounts(records: PackRecord[], windowSize: number) {
   return counts
 }
 
+function isFilledRecord(record: PackRecord) {
+  return Boolean(record.ssrRole || record.urRole || record.qtrId || record.erHit || record.spHit)
+}
+
+function numericPosition(value?: number | '') {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function inferredRowTotals(records: PackRecord[]) {
+  const totals = new Map<string, number>()
+  let currentTotal: number | undefined
+
+  for (const record of sortedRecords(records)) {
+    const ownTotal = numericPosition(record.rowTotalBefore)
+    if (ownTotal) currentTotal = ownTotal
+    if (currentTotal) totals.set(record.id, currentTotal)
+    if (currentTotal && isFilledRecord(record)) currentTotal = Math.max(0, currentTotal - 1)
+  }
+
+  return totals
+}
+
+function positionedSSRRecords(records: PackRecord[], config: GameConfig) {
+  const rowTotals = inferredRowTotals(records)
+
+  return sortedSSRRecords(records)
+    .map((record) => {
+      const sidePosition = numericPosition(record.sidePosition)
+      if (!record.side || !sidePosition || !record.ssrRole) return undefined
+
+      if (config.basketLayoutMode === 'singleRow') {
+        const rowTotal = numericPosition(record.rowTotalBefore) ?? rowTotals.get(record.id)
+        const index =
+          record.side === 'right' && rowTotal ? Math.max(1, rowTotal - sidePosition + 1) : sidePosition
+        return {
+          record,
+          lane: 'single-row',
+          index,
+          roleId: record.ssrRole,
+        }
+      }
+
+      return {
+        record,
+        lane: record.side,
+        index: sidePosition,
+        roleId: record.ssrRole,
+      }
+    })
+    .filter(
+      (
+        item,
+      ): item is {
+        record: PackRecord
+        lane: string
+        index: number
+        roleId: RoleId
+      } => Boolean(item),
+    )
+}
+
+function calculateLocalPositionMatchScores(
+  records: PackRecord[],
+  config: GameConfig,
+): Record<string, { score: number; evidenceCount: number }> {
+  const positioned = positionedSSRRecords(records, config)
+  if (positioned.length < 4) return {}
+
+  const latest = positioned[positioned.length - 1]
+  const localWindow = positioned
+    .filter((item) => item.lane === latest.lane && Math.abs(item.index - latest.index) <= 18)
+    .slice(-18)
+  const evidence = localWindow.length >= 4 ? localWindow : positioned.slice(-12)
+  const localCounts = emptyRoleMap()
+  const localRoles = new Set<RoleId>()
+
+  for (const item of evidence) {
+    const distance = Math.abs(item.index - latest.index)
+    const distanceWeight = item.lane === latest.lane ? clamp(1 - distance / 24, 0.35, 1) : 0.45
+    const age = Math.max(0, latest.record.sequence - item.record.sequence)
+    const recencyWeight = age <= 16 ? 1 : age <= 40 ? 0.75 : 0.5
+    localCounts[item.roleId] += distanceWeight * recencyWeight
+    localRoles.add(item.roleId)
+  }
+
+  const totalLocalWeight = Object.values(localCounts).reduce((sum, value) => sum + value, 0)
+  if (totalLocalWeight <= 0) return {}
+
+  return Object.fromEntries(
+    BOX_SAMPLES.map((sample) => {
+      const sampleSet = sampleRoleSet(sample.roles)
+      const overlapWeight = ROLES.reduce(
+        (sum, role) => sum + (sampleSet.has(role.id) ? localCounts[role.id] : 0),
+        0,
+      )
+      const overlapCount = [...localRoles].filter((roleId) => sampleSet.has(roleId)).length
+      const weightedCoverage = overlapWeight / totalLocalWeight
+      const roleCoverage = overlapCount / Math.max(1, localRoles.size)
+
+      return [
+        sample.title,
+        {
+          score: weightedCoverage * 0.65 + roleCoverage * 0.35,
+          evidenceCount: evidence.length,
+        },
+      ]
+    }),
+  )
+}
+
 function topRoleSet(counts: Record<RoleId, number>, limit: number) {
   return new Set(
     ROLES.map((role) => role.id)
@@ -167,11 +277,12 @@ function topRoleSet(counts: Record<RoleId, number>, limit: number) {
   )
 }
 
-function calculateConfigurationSignal(records: PackRecord[]): ConfigurationSignal {
+function calculateConfigurationSignal(records: PackRecord[], config: GameConfig): ConfigurationSignal {
   const ssrRecords = sortedSSRRecords(records)
   const observedSSR = calculateObservedSSRCounts(ssrRecords)
   const observedSSRTotal = Object.values(observedSSR).reduce((sum, value) => sum + value, 0)
   const activeRoleIds = ROLES.map((role) => role.id).filter((roleId) => observedSSR[roleId] > 0)
+  const localScores = calculateLocalPositionMatchScores(records, config)
 
   if (observedSSRTotal < 8 || activeRoleIds.length < 4) {
     return {
@@ -179,6 +290,7 @@ function calculateConfigurationSignal(records: PackRecord[]): ConfigurationSigna
       label: '低',
       detail: '样本太少，暂时更接近盲选模型',
       suspectedRoleIds: activeRoleIds.slice(0, 6),
+      matchedGroups: [],
     }
   }
 
@@ -189,13 +301,24 @@ function calculateConfigurationSignal(records: PackRecord[]): ConfigurationSigna
   const duplicateRatio = duplicateExcess / observedSSRTotal
   const sampleMatches = BOX_SAMPLES.map((sample) => {
     const set = sampleRoleSet(sample.roles)
+    const counts = countsFromRoles(sample.roles)
+    const roleIds = ROLES.map((role) => role.id).filter((roleId) => set.has(roleId))
     const overlap = activeRoleIds.filter((roleId) => set.has(roleId)).length
     const observedCoverage = overlap / Math.max(1, activeRoleIds.length)
     const sampleCoverage = overlap / Math.max(1, set.size)
+    const local = localScores[sample.title]
+    const localWeight = local && local.evidenceCount >= 4 ? 0.28 : 0
+    const globalScore = observedCoverage * 0.7 + sampleCoverage * 0.3
     return {
       sample,
       overlap,
-      score: observedCoverage * 0.7 + sampleCoverage * 0.3,
+      roleIds,
+      duplicateRoleIds: roleIds.filter((roleId) => counts[roleId] >= 2),
+      observedRoleIds: roleIds.filter((roleId) => observedSSR[roleId] > 0),
+      lowOrMissingRoleIds: roleIds.filter((roleId) => observedSSR[roleId] <= 1),
+      localScore: local?.score,
+      positionEvidenceCount: local?.evidenceCount,
+      score: globalScore * (1 - localWeight) + (local?.score ?? globalScore) * localWeight,
     }
   }).sort((a, b) => b.score - a.score)
 
@@ -240,6 +363,18 @@ function calculateConfigurationSignal(records: PackRecord[]): ConfigurationSigna
     detail,
     matchedSampleTitle: bestMatch.sample.title,
     suspectedRoleIds,
+    matchedGroups: sampleMatches.slice(0, 3).map((match) => ({
+      title: match.sample.title,
+      score: match.score,
+      localScore: match.localScore,
+      positionEvidenceCount: match.positionEvidenceCount,
+      overlapCount: match.overlap,
+      roleCount: match.roleIds.length,
+      roleIds: match.roleIds,
+      duplicateRoleIds: match.duplicateRoleIds,
+      observedRoleIds: match.observedRoleIds,
+      lowOrMissingRoleIds: match.lowOrMissingRoleIds,
+    })),
   }
 }
 
@@ -325,6 +460,72 @@ function hasVariantPair(records: PackRecord[], roleId: RoleId) {
   return variants.has('gold') && variants.has('silver')
 }
 
+function calculateConfigurationRemainingSignal(
+  records: PackRecord[],
+  configuration: ConfigurationSignal,
+) {
+  const observedSSR = calculateObservedSSRCounts(records)
+  const observedSSRTotal = Object.values(observedSSR).reduce((sum, value) => sum + value, 0)
+  const matchedGroups = configuration.matchedGroups
+  const groupScoreSum = matchedGroups.reduce((sum, group) => sum + Math.max(0.01, group.score), 0)
+  const configShare = clamp(configuration.score * 0.78, 0, 0.82)
+  const randomShare = 1 - configShare
+
+  const result = Object.fromEntries(
+    ROLES.map((role) => [
+      role.id,
+      {
+        expectedShare: 1 / ROLES.length,
+        observedShare: observedSSRTotal > 0 ? observedSSR[role.id] / observedSSRTotal : 0,
+        gap: 0,
+        duplicateSupport: 0,
+        inGroupSupport: 0,
+      },
+    ]),
+  ) as Record<
+    RoleId,
+    {
+      expectedShare: number
+      observedShare: number
+      gap: number
+      duplicateSupport: number
+      inGroupSupport: number
+    }
+  >
+
+  if (matchedGroups.length === 0 || groupScoreSum <= 0) return result
+
+  for (const role of ROLES) {
+    let expectedShare = randomShare / ROLES.length
+    let duplicateSupport = 0
+    let inGroupSupport = 0
+
+    for (const group of matchedGroups) {
+      const sample = BOX_SAMPLES.find((item) => item.title === group.title)
+      if (!sample) continue
+
+      const groupWeight = configShare * (Math.max(0.01, group.score) / groupScoreSum)
+      const sampleCounts = countsFromRoles(sample.roles)
+      const sampleTotal = Math.max(1, sample.roles.length)
+      const localLift =
+        group.localScore && group.positionEvidenceCount && group.positionEvidenceCount >= 4
+          ? clamp(0.85 + group.localScore * 0.3, 0.85, 1.12)
+          : 1
+
+      expectedShare += groupWeight * localLift * (sampleCounts[role.id] / sampleTotal)
+      if (sampleCounts[role.id] > 0) inGroupSupport += groupWeight
+      if (sampleCounts[role.id] >= 2) duplicateSupport += groupWeight
+    }
+
+    result[role.id].expectedShare = expectedShare
+    result[role.id].duplicateSupport = configShare > 0 ? duplicateSupport / configShare : 0
+    result[role.id].inGroupSupport = configShare > 0 ? inGroupSupport / configShare : 0
+    result[role.id].gap = expectedShare - result[role.id].observedShare
+  }
+
+  return result
+}
+
 export function calculateRoleScores(
   records: PackRecord[],
   config: GameConfig,
@@ -343,6 +544,7 @@ export function calculateRoleScores(
   const configScore = configuration.score
   const matchedSample = BOX_SAMPLES.find((sample) => sample.title === configuration.matchedSampleTitle)
   const matchedSampleRoles = matchedSample ? sampleRoleSet(matchedSample.roles) : new Set<RoleId>()
+  const remainingSignal = calculateConfigurationRemainingSignal(records, configuration)
   const scores = emptyRoleMap(alpha)
   const reasons = Object.fromEntries(ROLES.map((role) => [role.id, [] as string[]])) as Record<
     RoleId,
@@ -384,6 +586,27 @@ export function calculateRoleScores(
         : 0
     const underdrawnBonus =
       observedCount > 0 && recent30 === 0 ? finitePoolFactor * Math.min(0.45, underdrawn * 0.08) : 0
+    const remaining = remainingSignal[role.id]
+    const remainingFactor = clamp((observedSSRTotal - 12) / 44, 0, 1) * configScore
+    const positionEvidence =
+      configuration.matchedGroups.some(
+        (group) =>
+          group.positionEvidenceCount &&
+          group.positionEvidenceCount >= 4 &&
+          group.roleIds.includes(role.id),
+      )
+    const remainingBonus =
+      remaining.inGroupSupport > 0.15 && remaining.gap > 0
+        ? remainingFactor * Math.min(1.25, remaining.gap * 18)
+        : 0
+    const remainingPenalty =
+      observedCount > 0 && remaining.gap < -0.015
+        ? remainingFactor *
+          Math.min(1.35, Math.abs(remaining.gap) * 14) *
+          (1 - remaining.duplicateSupport * 0.48)
+        : 0
+    const localPositionBonus =
+      positionEvidence && remaining.inGroupSupport > 0.2 ? configScore * 0.16 : 0
     const modeMultiplier =
       config.mode === 'singleBoxSequential' && recent10 >= 2 ? 0.96 : 1
 
@@ -402,6 +625,9 @@ export function calculateRoleScores(
           sustainedHotBonus +
           emergingRoleBonus +
           underdrawnBonus -
+          remainingPenalty +
+          remainingBonus +
+          localPositionBonus -
           depletionPenalty,
       ) * modeMultiplier
     const blindScore = alpha + samplePresenceRate * 0.08
@@ -415,6 +641,9 @@ export function calculateRoleScores(
     if (pairBonus > 0) reasons[role.id].push(`金银配对弱信号`)
     if (matchedSampleBonus > 0) reasons[role.id].push(`落在疑似配置组`)
     if (sampleDuplicateBonus > 0) reasons[role.id].push(`整盒样本中有复数卡位先验`)
+    if (remainingBonus > 0.12) reasons[role.id].push('配置组余量偏高')
+    if (remainingPenalty > 0.12) reasons[role.id].push('配置组已出偏多')
+    if (localPositionBonus > 0) reasons[role.id].push('相近位置支持')
     if (finitePoolFactor > 0 && sustainedHot) reasons[role.id].push('累计偏高但近期仍活跃，保留热度')
     else if (finitePoolFactor > 0 && overdrawn >= 1) reasons[role.id].push('已抽出偏多，做消耗下修')
     if (finitePoolFactor > 0 && recentLowFrequency) reasons[role.id].push('低频入池且近期出现，剩余潜力上修')
@@ -454,7 +683,7 @@ function calculateConfidence(
 
 export function calculateProbabilities(records: PackRecord[], config: GameConfig): CalculationResult {
   const qtrContinuity = calculateQTRContinuity(records)
-  const configuration = calculateConfigurationSignal(records)
+  const configuration = calculateConfigurationSignal(records, config)
   const { scores, reasons, shift } = calculateRoleScores(
     records,
     config,
@@ -498,7 +727,7 @@ export function calculateProbabilities(records: PackRecord[], config: GameConfig
 
   return {
     rows,
-    topRows: rows.slice(0, 3),
+    topRows: rows.slice(0, 6),
     blindHitRate,
     actualPrice,
     observedSSRSlotRate,

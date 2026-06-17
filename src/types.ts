@@ -77,6 +77,18 @@ export type ConfigurationSignal = {
   detail: string
   matchedSampleTitle?: string
   suspectedRoleIds: RoleId[]
+  matchedGroups: Array<{
+    title: string
+    score: number
+    localScore?: number
+    positionEvidenceCount?: number
+    overlapCount: number
+    roleCount: number
+    roleIds: RoleId[]
+    duplicateRoleIds: RoleId[]
+    observedRoleIds: RoleId[]
+    lowOrMissingRoleIds: RoleId[]
+  }>
 }
 
 export type RoleProbability = {

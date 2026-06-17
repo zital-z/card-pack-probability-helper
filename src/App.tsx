@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 import { DEFAULT_RECORDS } from './data/defaultRecords'
+import { QTR_ROLES } from './data/qtrRoles'
 import { ROLES } from './data/roles'
+import { UR_ROLES } from './data/urRoles'
 import { parseCsvRecords, recordsToCsv } from './lib/csv'
 import {
   calculateAtLeastKHitProbability,
   calculateProbabilities,
 } from './lib/probability'
-import type { BasketLayoutMode, BasketSide, CardVariant, GameConfig, PackRecord, RoleId } from './types'
+import type { BasketLayoutMode, BasketSide, GameConfig, PackRecord, RoleId } from './types'
 
 const STORAGE_KEY = 'card-pack-probability-helper:v1'
 const pageSizeOptions = [10, 20, 50]
@@ -87,6 +89,25 @@ function roleLabel(roleId?: RoleId | '') {
   if (!roleId) return ''
   const role = ROLES.find((item) => item.id === roleId)
   return role ? `${role.id} ${role.name}` : roleId
+}
+
+function urRoleLabel(roleId?: RoleId | '') {
+  if (!roleId) return ''
+  const role = UR_ROLES.find((item) => item.id === roleId)
+  return role ? `UR${role.id} ${role.name}` : roleId
+}
+
+function qtrLabel(qtrId?: string) {
+  if (!qtrId) return ''
+  const match = qtrId.match(/\d{1,2}/)
+  const normalized = match ? match[0].padStart(2, '0') : qtrId
+  const qtr = QTR_ROLES.find((item) => item.id === normalized)
+  return qtr ? `QTR${qtr.id} ${qtr.name}` : qtrId
+}
+
+function qtrValue(qtrId?: string) {
+  const match = qtrId?.match(/\d{1,2}/)
+  return match ? `QTR-${match[0].padStart(2, '0')}` : ''
 }
 
 function readInitialState() {
@@ -312,7 +333,7 @@ function App() {
     },
   ]
   const isSingleRowLayout = config.basketLayoutMode === 'singleRow'
-  const recordTableColSpan = isSingleRowLayout ? 13 : 14
+  const recordTableColSpan = isSingleRowLayout ? 12 : 13
 
   return (
     <main className="app-shell">
@@ -328,6 +349,73 @@ function App() {
           <span>QTR {result.qtrContinuity.label}</span>
         </div>
       </header>
+
+      <section className="top-panel top-panel-priority">
+        <div className="section-heading">
+          <div>
+            <h2>Top6候选</h2>
+            <p>{result.configuration.detail}；{result.qtrContinuity.detail}</p>
+          </div>
+        </div>
+        <div className="configuration-summary">
+          <span>配置置信度 {percent(result.configuration.score)}</span>
+          <span>
+            疑似角色组：
+            {result.configuration.suspectedRoleIds.length > 0
+              ? result.configuration.suspectedRoleIds.map((roleId) => roleLabel(roleId)).join('、')
+              : '-'}
+          </span>
+        </div>
+        {result.configuration.matchedGroups.length > 0 && (
+          <div className="configuration-groups">
+            {result.configuration.matchedGroups.map((group, index) => (
+              <article className="configuration-card" key={group.title}>
+                <div className="configuration-card-heading">
+                  <strong>配置{index + 1} · {group.title}</strong>
+                  <span>{percent(group.score)} · 命中 {group.overlapCount}/{group.roleCount}</span>
+                </div>
+                {group.positionEvidenceCount && group.positionEvidenceCount >= 4 && (
+                  <p>
+                    附近位置：
+                    {percent(group.localScore ?? 0)} · {group.positionEvidenceCount}条位置记录
+                  </p>
+                )}
+                <p>
+                  重复位：
+                  {group.duplicateRoleIds.length > 0
+                    ? group.duplicateRoleIds.map((roleId) => roleLabel(roleId)).join('、')
+                    : '-'}
+                </p>
+                <p>
+                  本次已出：
+                  {group.observedRoleIds.length > 0
+                    ? group.observedRoleIds.map((roleId) => roleLabel(roleId)).join('、')
+                    : '-'}
+                </p>
+                <p>
+                  低频/未出：
+                  {group.lowOrMissingRoleIds.length > 0
+                    ? group.lowOrMissingRoleIds.map((roleId) => roleLabel(roleId)).join('、')
+                    : '-'}
+                </p>
+              </article>
+            ))}
+          </div>
+        )}
+        <div className="top-list">
+          {result.topRows.map((row) => (
+            <article key={row.role.id} className="top-item">
+              <span>Top {row.rank}</span>
+              <strong>{roleLabel(row.role.id)}</strong>
+              <div className="top-stats">
+                <b>{percent(row.pHit)}</b>
+                <small>有效命中率 · {row.level}</small>
+              </div>
+              <p>{row.reasons.join('，')}</p>
+            </article>
+          ))}
+        </div>
+      </section>
 
       <section className="workbench">
         <aside className="settings-panel">
@@ -567,7 +655,9 @@ function App() {
             <div className="button-row">
               <button type="button" onClick={addOrder}>新增一单</button>
               <button type="button" onClick={() => addRecordsToCurrentOrder(1)}>本单+1</button>
+              <button type="button" onClick={() => addRecordsToCurrentOrder(2)}>本单+2</button>
               <button type="button" onClick={() => addRecordsToCurrentOrder(3)}>本单+3</button>
+              <button type="button" onClick={() => addRecordsToCurrentOrder(4)}>本单+4</button>
               <button type="button" onClick={() => addRecordsToCurrentOrder(5)}>本单+5</button>
               <button type="button" onClick={() => addRecordsToCurrentOrder(10)}>本单+10</button>
               <button type="button" onClick={saveCurrentSession}>保存本次</button>
@@ -621,7 +711,6 @@ function App() {
                   <th>{isSingleRowLayout ? '数向' : '边'}</th>
                   <th>{isSingleRowLayout ? '排位' : '侧位'}</th>
                   <th>序号</th>
-                  <th>金/银</th>
                   <th>UR角色</th>
                   <th>QTR</th>
                   <th>ER</th>
@@ -638,8 +727,12 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {pagedRecords.map((record) => (
-                  <tr className={!record.ssrRole ? 'pending-row' : undefined} key={record.id}>
+                {pagedRecords.map((record) => {
+                  const hasHighValueHit = Boolean(record.urRole || record.erHit || record.spHit)
+                  const isFilled = Boolean(record.ssrRole || hasHighValueHit)
+
+                  return (
+                  <tr className={hasHighValueHit ? 'high-value-row' : !isFilled ? 'pending-row' : undefined} key={record.id}>
                     <td>
                       <button type="button" className="icon-button" onClick={() => removeRecord(record.id)} aria-label="删除">
                         ×
@@ -698,38 +791,25 @@ function App() {
                     </td>
                     <td>
                       <select
-                        value={record.ssrVariant}
-                        onChange={(event) =>
-                          updateRecord(record.id, { ssrVariant: event.target.value as CardVariant })
-                        }
-                      >
-                        <option value="">未记</option>
-                        <option value="silver">银</option>
-                        <option value="gold">金</option>
-                        <option value="unknown">不确定</option>
-                      </select>
-                    </td>
-                    <td>
-                      <select
                         value={record.urRole}
                         onChange={(event) =>
                           updateRecord(record.id, { urRole: event.target.value as RoleId | '' })
                         }
                       >
                         <option value="">无</option>
-                        {ROLES.map((role) => (
-                          <option key={role.id} value={role.id}>{roleLabel(role.id)}</option>
+                        {UR_ROLES.map((role) => (
+                          <option key={role.id} value={role.id}>{urRoleLabel(role.id)}</option>
                         ))}
                       </select>
                     </td>
                     <td>
                       <select
-                        value={record.qtrId}
+                        value={qtrValue(record.qtrId)}
                         onChange={(event) => updateRecord(record.id, { qtrId: event.target.value })}
                       >
                         <option value="">无</option>
-                        {Array.from({ length: 10 }, (_, index) => `QTR-${index + 1}`).map((qtr) => (
-                          <option key={qtr} value={qtr}>{qtr}</option>
+                        {QTR_ROLES.map((qtr) => (
+                          <option key={qtr.id} value={`QTR-${qtr.id}`}>{qtrLabel(qtr.id)}</option>
                         ))}
                       </select>
                     </td>
@@ -797,7 +877,8 @@ function App() {
                       />
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
                 {records.length === 0 && (
                   <tr>
                     <td colSpan={recordTableColSpan} className="empty-cell">暂无记录，点“新增一单”开始录入。</td>
@@ -818,146 +899,50 @@ function App() {
         </section>
       </section>
 
-      <section className="results-grid">
-        <section className="top-panel">
-          <div className="section-heading">
-            <div>
-              <h2>Top候选</h2>
-              <p>{result.configuration.detail}；{result.qtrContinuity.detail}</p>
-            </div>
-          </div>
-          <div className="configuration-summary">
-            <span>配置置信度 {percent(result.configuration.score)}</span>
-            <span>
-              疑似角色组：
-              {result.configuration.suspectedRoleIds.length > 0
-                ? result.configuration.suspectedRoleIds.map((roleId) => roleLabel(roleId)).join('、')
-                : '-'}
-            </span>
-          </div>
-          <div className="top-list">
-            {result.topRows.map((row) => (
-              <article key={row.role.id} className="top-item">
-                <span>Top {row.rank}</span>
-                <strong>{roleLabel(row.role.id)}</strong>
-                <div className="top-stats">
-                  <b>{percent(row.pHit)}</b>
-                  <small>有效命中率 · {row.level}</small>
-                </div>
-                <p>{row.reasons.join('，')}</p>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <section className="buy-panel">
-          <div className="section-heading">
-            <div>
-              <h2>建议购买包数概率</h2>
-              <p>按当前Top1角色估算至少中指定盒数的概率。</p>
-            </div>
-            <label className="inline-control">
-              至少中
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={targetHitCount}
-                onChange={(event) => setTargetHitCount(Number(event.target.value) || 1)}
-              />
-              盒
-            </label>
-          </div>
-          <div className="buy-context-grid">
-            <label>
-              试算包数
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={config.customBuyCount ?? ''}
-                onChange={(event) =>
-                  updateConfig('customBuyCount', event.target.value ? Number(event.target.value) : '')
-                }
-                placeholder="如 7"
-              />
-            </label>
-            <label>
-              已买包数
-              <input
-                type="number"
-                min="0"
-                step="1"
-                value={config.priorPackCount ?? ''}
-                onChange={(event) =>
-                  updateConfig('priorPackCount', event.target.value ? Number(event.target.value) : '')
-                }
-                placeholder="如 17"
-              />
-            </label>
-            <label>
-              已中盒数
-              <input
-                type="number"
-                min="0"
-                step="1"
-                value={config.priorHitCount ?? ''}
-                onChange={(event) =>
-                  updateConfig('priorHitCount', event.target.value ? Number(event.target.value) : '')
-                }
-                placeholder="如 0"
-              />
-            </label>
-            <label>
-              已花金额
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={config.priorSpend ?? ''}
-                onChange={(event) =>
-                  updateConfig('priorSpend', event.target.value ? Number(event.target.value) : '')
-                }
-                placeholder="不填则估算"
-              />
-            </label>
-          </div>
-          <div className="buy-summary">
-            <span>当前实付：{priorPackCount > 0 ? money(priorSpend) : '-'}</span>
-            <span>当前成本：{currentActualCost === undefined ? '-' : `${money(currentActualCost)}/包`}</span>
-            <span>目标价：{money(config.channelCostTarget)}/包</span>
-          </div>
-          <div className="buy-grid">
-            {buyCounts.map((count) => {
-              const p = top
-                ? calculateAtLeastKHitProbability(top.pHit, count, targetHitCount)
-                : 0
-              const totalSpend = priorSpend + count * result.actualPrice
-              const noHitEffectivePacks = priorEffectivePacks + count
-              const hitEffectivePacks =
-                priorEffectivePacks + count + targetHitCount * config.rewardBoxPacks
-              const noHitCost =
-                noHitEffectivePacks > 0 ? totalSpend / noHitEffectivePacks : undefined
-              const hitCost = hitEffectivePacks > 0 ? totalSpend / hitEffectivePacks : undefined
-              return (
-                <div className="buy-row" key={count}>
-                  <span>买 {count} 包</span>
-                  <strong>{percent(p)}</strong>
-                  <em className={noHitCost && noHitCost <= config.channelCostTarget ? 'positive' : ''}>
-                    未中 {noHitCost === undefined ? '-' : money(noHitCost)}
-                  </em>
-                  <em className={hitCost && hitCost <= config.channelCostTarget ? 'positive' : ''}>
-                    中后 {hitCost === undefined ? '-' : money(hitCost)}
-                  </em>
-                  <div className="bar"><i style={{ width: `${Math.min(100, p * 100)}%` }} /></div>
-                </div>
-              )
-            })}
-          </div>
-        </section>
-      </section>
-
       <section className="probability-panel">
+        <div className="section-heading">
+          <div>
+            <h2>全部角色概率表</h2>
+            <p>
+              观测SSR槽率 {percent(result.observedSSRSlotRate)}，模型使用SSR槽率 {percent(config.pSSRSlot)}。
+            </p>
+          </div>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>排名</th>
+                <th>角色</th>
+                <th>P(role|SSR)</th>
+                <th>有效命中率</th>
+                <th>{config.plannedPackCount}包至少中1盒</th>
+                <th>期望成本/包</th>
+                <th>提升</th>
+                <th>建议</th>
+                <th>理由</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.rows.map((row) => (
+                <tr key={row.role.id}>
+                  <td>{row.rank}</td>
+                  <td><strong>{roleLabel(row.role.id)}</strong></td>
+                  <td>{percent(row.pRoleGivenSSR)}</td>
+                  <td>{percent(row.pHit)}</td>
+                  <td>{percent(row.atLeastOneHit)}</td>
+                  <td className={row.expectedCost <= config.channelCostTarget ? 'positive' : ''}>
+                    {money(row.expectedCost)}
+                  </td>
+                  <td>{row.liftVsBlind.toFixed(2)}x</td>
+                  <td><span className={`level level-${row.level}`}>{row.level}</span></td>
+                  <td>{row.reasons.join('，')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
         <div className="side-frequency-grid">
           {sideGroups.map(({ side, label, shortLabel }) => {
             const sideSsrTotal = records.filter(
@@ -1000,48 +985,111 @@ function App() {
             )
           })}
         </div>
+      </section>
 
+      <section className="buy-panel">
         <div className="section-heading">
           <div>
-            <h2>全部角色概率表</h2>
-            <p>
-              观测SSR槽率 {percent(result.observedSSRSlotRate)}，模型使用SSR槽率 {percent(config.pSSRSlot)}。
-            </p>
+            <h2>建议购买包数概率</h2>
+            <p>按当前Top1角色估算至少中指定盒数的概率。</p>
           </div>
+          <label className="inline-control">
+            至少中
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={targetHitCount}
+              onChange={(event) => setTargetHitCount(Number(event.target.value) || 1)}
+            />
+            盒
+          </label>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>排名</th>
-                <th>角色</th>
-                <th>P(role|SSR)</th>
-                <th>有效命中率</th>
-                <th>{config.plannedPackCount}包至少中1盒</th>
-                <th>期望成本/包</th>
-                <th>提升</th>
-                <th>建议</th>
-                <th>理由</th>
-              </tr>
-            </thead>
-            <tbody>
-              {result.rows.map((row) => (
-                <tr key={row.role.id}>
-                  <td>{row.rank}</td>
-                  <td><strong>{roleLabel(row.role.id)}</strong></td>
-                  <td>{percent(row.pRoleGivenSSR)}</td>
-                  <td>{percent(row.pHit)}</td>
-                  <td>{percent(row.atLeastOneHit)}</td>
-                  <td className={row.expectedCost <= config.channelCostTarget ? 'positive' : ''}>
-                    {money(row.expectedCost)}
-                  </td>
-                  <td>{row.liftVsBlind.toFixed(2)}x</td>
-                  <td><span className={`level level-${row.level}`}>{row.level}</span></td>
-                  <td>{row.reasons.join('，')}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="buy-context-grid">
+          <label>
+            试算包数
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={config.customBuyCount ?? ''}
+              onChange={(event) =>
+                updateConfig('customBuyCount', event.target.value ? Number(event.target.value) : '')
+              }
+              placeholder="如 7"
+            />
+          </label>
+          <label>
+            已买包数
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={config.priorPackCount ?? ''}
+              onChange={(event) =>
+                updateConfig('priorPackCount', event.target.value ? Number(event.target.value) : '')
+              }
+              placeholder="如 17"
+            />
+          </label>
+          <label>
+            已中盒数
+            <input
+              type="number"
+              min="0"
+              step="1"
+              value={config.priorHitCount ?? ''}
+              onChange={(event) =>
+                updateConfig('priorHitCount', event.target.value ? Number(event.target.value) : '')
+              }
+              placeholder="如 0"
+            />
+          </label>
+          <label>
+            已花金额
+            <input
+              type="number"
+              min="0"
+              step="0.1"
+              value={config.priorSpend ?? ''}
+              onChange={(event) =>
+                updateConfig('priorSpend', event.target.value ? Number(event.target.value) : '')
+              }
+              placeholder="不填则估算"
+            />
+          </label>
+        </div>
+        <div className="buy-summary">
+          <span>当前实付：{priorPackCount > 0 ? money(priorSpend) : '-'}</span>
+          <span>当前成本：{currentActualCost === undefined ? '-' : `${money(currentActualCost)}/包`}</span>
+          <span>目标价：{money(config.channelCostTarget)}/包</span>
+        </div>
+        <div className="buy-grid">
+          {buyCounts.map((count) => {
+            const p = top
+              ? calculateAtLeastKHitProbability(top.pHit, count, targetHitCount)
+              : 0
+            const totalSpend = priorSpend + count * result.actualPrice
+            const noHitEffectivePacks = priorEffectivePacks + count
+            const hitEffectivePacks =
+              priorEffectivePacks + count + targetHitCount * config.rewardBoxPacks
+            const noHitCost =
+              noHitEffectivePacks > 0 ? totalSpend / noHitEffectivePacks : undefined
+            const hitCost = hitEffectivePacks > 0 ? totalSpend / hitEffectivePacks : undefined
+            return (
+              <div className="buy-row" key={count}>
+                <span>买 {count} 包</span>
+                <strong>{percent(p)}</strong>
+                <em className={noHitCost && noHitCost <= config.channelCostTarget ? 'positive' : ''}>
+                  未中 {noHitCost === undefined ? '-' : money(noHitCost)}
+                </em>
+                <em className={hitCost && hitCost <= config.channelCostTarget ? 'positive' : ''}>
+                  中后 {hitCost === undefined ? '-' : money(hitCost)}
+                </em>
+                <div className="bar"><i style={{ width: `${Math.min(100, p * 100)}%` }} /></div>
+              </div>
+            )
+          })}
         </div>
       </section>
 
