@@ -553,9 +553,25 @@ td {
   margin-bottom: 12px;
 }
 
+.queue-signal-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 12px;
+}
+
 .configuration-card {
   background: #ffffff;
   border: 1px solid #d8e1dd;
+  border-radius: 8px;
+  display: grid;
+  gap: 7px;
+  padding: 11px;
+}
+
+.queue-signal-card {
+  background: #fffdf7;
+  border: 1px solid #eadfbd;
   border-radius: 8px;
   display: grid;
   gap: 7px;
@@ -573,12 +589,55 @@ td {
 }
 
 .configuration-card-heading span,
-.configuration-card p {
+.configuration-card p,
+.queue-signal-card p {
   color: #5e6c68;
   font-size: 12px;
   line-height: 1.45;
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.configuration-role-list {
+  display: grid;
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.config-role-balance {
+  align-items: center;
+  background: #f7faf8;
+  border: 1px solid #e1e9e5;
+  border-radius: 6px;
+  display: grid;
+  gap: 5px;
+  grid-template-columns: minmax(72px, 1fr) minmax(88px, 1fr) 58px 42px;
+  padding: 6px 7px;
+}
+
+.config-role-balance b,
+.config-role-balance em,
+.config-role-balance small {
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.config-role-balance b {
+  color: #243432;
+}
+
+.config-role-balance em {
+  color: #60716d;
+  font-style: normal;
+}
+
+.config-role-balance small {
+  border-radius: 999px;
+  color: #315e60;
+  font-weight: 800;
+  text-align: right;
 }
 
 .top-item {
@@ -692,6 +751,10 @@ td {
   margin-top: 16px;
 }
 
+.row-segment-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .side-frequency-card {
   border: 1px solid #dbe2df;
   background: #ffffff;
@@ -794,6 +857,10 @@ footer {
     grid-template-columns: 1fr;
   }
 
+  .queue-signal-grid {
+    grid-template-columns: 1fr;
+  }
+
   .buy-row {
     grid-template-columns: 70px 68px 84px 84px minmax(120px, 1fr);
   }
@@ -893,6 +960,14 @@ footer {
   .top-item p,
   .notice-list p {
     overflow-wrap: anywhere;
+  }
+
+  .config-role-balance {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .config-role-balance small {
+    text-align: left;
   }
 
   .csv-box {

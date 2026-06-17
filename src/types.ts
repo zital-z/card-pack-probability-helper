@@ -22,6 +22,7 @@ export type RoleId =
 export type CardVariant = '' | 'gold' | 'silver' | 'unknown'
 export type BasketSide = '' | 'left' | 'right'
 export type BasketLayoutMode = 'twoColumns' | 'singleRow'
+export type ReplenishmentDirection = 'unknown' | 'left' | 'right' | 'front' | 'back' | 'both'
 
 export type PackRecord = {
   id: string
@@ -38,6 +39,7 @@ export type PackRecord = {
   leftTotalBefore?: number | ''
   rightTotalBefore?: number | ''
   rowTotalBefore?: number | ''
+  replenishmentDirection?: ReplenishmentDirection | ''
   note?: string
 }
 
@@ -50,6 +52,7 @@ export type GameConfig = {
   channelCostTarget: number
   mode: 'mixedBasket' | 'singleBoxSequential'
   basketLayoutMode: BasketLayoutMode
+  replenishmentDirection: ReplenishmentDirection
   erPosition: 'thinSlot' | 'thickSlot' | 'unknown'
   initialPoolPacks?: number | ''
   observedErCount?: number | ''
@@ -104,6 +107,21 @@ export type RoleProbability = {
   reasons: string[]
 }
 
+export type QueueSignal = {
+  lane: 'left' | 'right' | 'row'
+  label: string
+  evidenceCount: number
+  centerPosition: number
+  roleIds: RoleId[]
+  focusRoleIds: RoleId[]
+  matchedGroups: Array<{
+    title: string
+    score: number
+    roleIds: RoleId[]
+    remainingRoleIds: RoleId[]
+  }>
+}
+
 export type CalculationResult = {
   rows: RoleProbability[]
   topRows: RoleProbability[]
@@ -112,6 +130,7 @@ export type CalculationResult = {
   observedSSRSlotRate: number
   qtrContinuity: QtrContinuity
   configuration: ConfigurationSignal
+  queueSignals: QueueSignal[]
   confidence: 'low' | 'medium' | 'high'
   warnings: string[]
 }

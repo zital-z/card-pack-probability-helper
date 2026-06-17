@@ -1,4 +1,4 @@
-import type { BasketSide, CardVariant, PackRecord, RoleId } from '../types'
+import type { BasketSide, CardVariant, PackRecord, ReplenishmentDirection, RoleId } from '../types'
 
 const ROLE_IDS = new Set(
   Array.from({ length: 19 }, (_, index) => String(index + 1).padStart(2, '0')),
@@ -30,6 +30,18 @@ function cleanSide(value?: string): BasketSide {
   if (!trimmed) return ''
   if (trimmed === 'left' || trimmed === 'l' || trimmed === '左' || trimmed === '从左数') return 'left'
   if (trimmed === 'right' || trimmed === 'r' || trimmed === '右' || trimmed === '从右数') return 'right'
+  return ''
+}
+
+function cleanReplenishmentDirection(value?: string): ReplenishmentDirection | '' {
+  const trimmed = value?.trim().toLowerCase()
+  if (!trimmed) return ''
+  if (trimmed === 'unknown' || trimmed === '不确定') return 'unknown'
+  if (trimmed === 'left' || trimmed === 'l' || trimmed === '左' || trimmed === '左补' || trimmed === '从左补') return 'left'
+  if (trimmed === 'right' || trimmed === 'r' || trimmed === '右' || trimmed === '右补' || trimmed === '从右补') return 'right'
+  if (trimmed === 'front' || trimmed === '前' || trimmed === '前补') return 'front'
+  if (trimmed === 'back' || trimmed === '后' || trimmed === '后补') return 'back'
+  if (trimmed === 'both' || trimmed === '两边' || trimmed === '都有') return 'both'
   return ''
 }
 
@@ -88,6 +100,7 @@ export function parseCsvRecords(text: string, startingSequence = 1): PackRecord[
         'leftTotalBefore',
         'rightTotalBefore',
         'rowTotalBefore',
+        'replenishmentDirection',
         'note',
       ]
   const dataLines = hasHeader ? lines.slice(1) : lines
@@ -112,6 +125,9 @@ export function parseCsvRecords(text: string, startingSequence = 1): PackRecord[
       leftTotalBefore: cleanNumber(values.leftTotalBefore ?? values['左抽前总']),
       rightTotalBefore: cleanNumber(values.rightTotalBefore ?? values['右抽前总']),
       rowTotalBefore: cleanNumber(values.rowTotalBefore ?? values['整排抽前总']),
+      replenishmentDirection: cleanReplenishmentDirection(
+        values.replenishmentDirection ?? values['补包方向'] ?? values['补包'],
+      ),
       note: (values.note ?? values['备注'] ?? '').trim(),
     }
   })
@@ -139,6 +155,7 @@ export function recordsToCsv(records: PackRecord[]) {
     'leftTotalBefore',
     'rightTotalBefore',
     'rowTotalBefore',
+    'replenishmentDirection',
     'note',
   ]
   const lines = records.map((record) =>
@@ -156,6 +173,7 @@ export function recordsToCsv(records: PackRecord[]) {
       record.leftTotalBefore,
       record.rightTotalBefore,
       record.rowTotalBefore,
+      record.replenishmentDirection,
       record.note,
     ]
       .map(escapeCell)

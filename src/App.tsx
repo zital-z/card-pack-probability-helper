@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import './App.css'
+import { BOX_SAMPLES } from './data/boxSamples'
 import { DEFAULT_RECORDS } from './data/defaultRecords'
 import { QTR_ROLES } from './data/qtrRoles'
 import { ROLES } from './data/roles'
@@ -32,6 +33,7 @@ const defaultConfig: GameConfig = {
   channelCostTarget: 6.5,
   mode: 'mixedBasket',
   basketLayoutMode: 'twoColumns',
+  replenishmentDirection: 'unknown',
   erPosition: 'unknown',
   initialPoolPacks: '',
   observedErCount: '',
@@ -57,6 +59,7 @@ const blankRecord = (sequence: number, orderId: number): PackRecord => ({
   leftTotalBefore: '',
   rightTotalBefore: '',
   rowTotalBefore: '',
+  replenishmentDirection: '',
   note: '',
 })
 
@@ -70,6 +73,14 @@ function money(value: number) {
 
 function numericConfigValue(value: number | '' | undefined) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function numericRecordValue(value: number | '' | undefined) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function isFilledRecord(record: PackRecord) {
+  return Boolean(record.ssrRole || record.urRole || record.qtrId || record.erHit || record.spHit)
 }
 
 function erDensityLabel(erCount: number, poolPacks?: number) {
@@ -108,6 +119,60 @@ function qtrLabel(qtrId?: string) {
 function qtrValue(qtrId?: string) {
   const match = qtrId?.match(/\d{1,2}/)
   return match ? `QTR-${match[0].padStart(2, '0')}` : ''
+}
+
+function roleCountInSample(sampleRoles: RoleId[], roleId: RoleId) {
+  return sampleRoles.filter((sampleRoleId) => sampleRoleId === roleId).length
+}
+
+function roleBalanceLabel(observedCount: number, expectedCount: number) {
+  if (expectedCount <= 0) return '不在组内'
+  if (observedCount <= Math.max(0.5, expectedCount * 0.72)) return '偏少'
+  if (observedCount >= Math.max(2, expectedCount * 1.3)) return '偏多'
+  return '接近'
+}
+
+function estimateBoxScope(config: GameConfig) {
+  if (typeof config.initialPoolPacks === 'number' && config.initialPoolPacks > 0) {
+    return {
+      boxCount: config.initialPoolPacks / 16,
+      label: `按起始余量 ${config.initialPoolPacks} 包估算`,
+    }
+  }
+
+  if (typeof config.mixedCaseCount === 'number' && config.mixedCaseCount > 0) {
+    return {
+      boxCount: config.mixedCaseCount * 24,
+      label: `按 ${config.mixedCaseCount} 箱完整池粗估`,
+    }
+  }
+
+  return undefined
+}
+
+function estimatedRemainingRoleCount(sampleCount: number, observedCount: number, boxCount?: number) {
+  if (!boxCount) return undefined
+  return Math.max(0, sampleCount * boxCount - observedCount)
+}
+
+function inferRowTotals(records: PackRecord[]) {
+  const totals = new Map<string, number>()
+  let currentTotal: number | undefined
+
+  for (const record of [...records].sort((a, b) => a.sequence - b.sequence)) {
+    const ownTotal = numericRecordValue(record.rowTotalBefore)
+    if (ownTotal) currentTotal = ownTotal
+    if (currentTotal) totals.set(record.id, currentTotal)
+    if (currentTotal && isFilledRecord(record)) currentTotal = Math.max(0, currentTotal - 1)
+  }
+
+  return totals
+}
+
+function actualSingleRowIndex(record: PackRecord, rowTotal?: number) {
+  const position = numericRecordValue(record.sidePosition)
+  if (!position || !record.side || !rowTotal) return undefined
+  return record.side === 'right' ? Math.max(1, rowTotal - position + 1) : position
 }
 
 function readInitialState() {
@@ -333,7 +398,52 @@ function App() {
     },
   ]
   const isSingleRowLayout = config.basketLayoutMode === 'singleRow'
-  const recordTableColSpan = isSingleRowLayout ? 12 : 13
+  const recordTableColSpan = isSingleRowLayout ? 13 : 14
+  const observedSsrCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        ROLES.map((role) => [
+          role.id,
+          records.filter((record) => record.ssrRole === role.id).length,
+        ]),
+      ) as Record<RoleId, number>,
+    [records],
+  )
+  const observedSsrTotal = Object.values(observedSsrCounts).reduce((sum, value) => sum + value, 0)
+  const boxScope = estimateBoxScope(config)
+  const rowTotals = useMemo(() => inferRowTotals(records), [records])
+  const rowSegments = useMemo(() => {
+    const segments = [
+      { id: 'left', label: '左段', min: 0, max: 1 / 3 },
+      { id: 'middle', label: '中段', min: 1 / 3, max: 2 / 3 },
+      { id: 'right', label: '右段', min: 2 / 3, max: 1 },
+    ]
+
+    return segments.map((segment) => {
+      const segmentRecords = records.filter((record) => {
+        if (!record.ssrRole) return false
+        const rowTotal = numericRecordValue(record.rowTotalBefore) ?? rowTotals.get(record.id)
+        const index = actualSingleRowIndex(record, rowTotal)
+        if (!index || !rowTotal) return false
+        const ratio = index / rowTotal
+        return segment.id === 'right'
+          ? ratio > segment.min && ratio <= segment.max
+          : ratio > segment.min && ratio <= segment.max
+      })
+
+      return {
+        ...segment,
+        records: segmentRecords,
+        total: segmentRecords.length,
+        maxRoleCount: Math.max(
+          1,
+          ...ROLES.map(
+            (role) => segmentRecords.filter((record) => record.ssrRole === role.id).length,
+          ),
+        ),
+      }
+    })
+  }, [records, rowTotals])
 
   return (
     <main className="app-shell">
@@ -366,40 +476,89 @@ function App() {
               : '-'}
           </span>
         </div>
+        {result.queueSignals.length > 0 && (
+          <div className="queue-signal-grid">
+            {result.queueSignals.map((signal) => (
+              <article className="queue-signal-card" key={signal.lane}>
+                <div className="configuration-card-heading">
+                  <strong>{signal.label}</strong>
+                  <span>中心位约 {signal.centerPosition} · {signal.evidenceCount} 条位置记录</span>
+                </div>
+                <p>
+                  局部重点：
+                  {signal.focusRoleIds.map((roleId) => roleLabel(roleId)).join('、')}
+                </p>
+                <p>
+                  局部已见：
+                  {signal.roleIds.map((roleId) => roleLabel(roleId)).join('、')}
+                </p>
+                {signal.matchedGroups.map((group) => (
+                  <p key={group.title}>
+                    {group.title} {percent(group.score)}；候补残留：
+                    {group.remainingRoleIds.length > 0
+                      ? group.remainingRoleIds.map((roleId) => roleLabel(roleId)).join('、')
+                      : '-'}
+                  </p>
+                ))}
+              </article>
+            ))}
+          </div>
+        )}
         {result.configuration.matchedGroups.length > 0 && (
           <div className="configuration-groups">
-            {result.configuration.matchedGroups.map((group, index) => (
-              <article className="configuration-card" key={group.title}>
-                <div className="configuration-card-heading">
-                  <strong>配置{index + 1} · {group.title}</strong>
-                  <span>{percent(group.score)} · 命中 {group.overlapCount}/{group.roleCount}</span>
-                </div>
-                {group.positionEvidenceCount && group.positionEvidenceCount >= 4 && (
+            {result.configuration.matchedGroups.map((group, index) => {
+              const sample = BOX_SAMPLES.find((item) => item.title === group.title)
+              return (
+                <article className="configuration-card" key={group.title}>
+                  <div className="configuration-card-heading">
+                    <strong>配置{index + 1} · {group.title}</strong>
+                    <span>{percent(group.score)} · 命中 {group.overlapCount}/{group.roleCount}</span>
+                  </div>
+                  {group.positionEvidenceCount && group.positionEvidenceCount >= 4 && (
                   <p>
                     附近位置：
                     {percent(group.localScore ?? 0)} · {group.positionEvidenceCount}条位置记录
                   </p>
-                )}
-                <p>
-                  重复位：
-                  {group.duplicateRoleIds.length > 0
-                    ? group.duplicateRoleIds.map((roleId) => roleLabel(roleId)).join('、')
-                    : '-'}
-                </p>
-                <p>
-                  本次已出：
-                  {group.observedRoleIds.length > 0
-                    ? group.observedRoleIds.map((roleId) => roleLabel(roleId)).join('、')
-                    : '-'}
-                </p>
-                <p>
-                  低频/未出：
-                  {group.lowOrMissingRoleIds.length > 0
-                    ? group.lowOrMissingRoleIds.map((roleId) => roleLabel(roleId)).join('、')
-                    : '-'}
-                </p>
-              </article>
-            ))}
+                  )}
+                  <p>
+                    重复位：
+                    {group.duplicateRoleIds.length > 0
+                      ? group.duplicateRoleIds.map((roleId) => roleLabel(roleId)).join('、')
+                      : '-'}
+                  </p>
+                  <p>估余口径：{boxScope?.label ?? '需填写起始余量或几箱混'}</p>
+                  <div className="configuration-role-list">
+                    {group.roleIds.map((roleId) => {
+                      const sampleCount = sample ? roleCountInSample(sample.roles, roleId) : 0
+                      const expectedCount =
+                        observedSsrTotal > 0 && sample
+                          ? (sampleCount / Math.max(1, sample.roles.length)) * observedSsrTotal
+                          : sampleCount
+                      const observedCount = observedSsrCounts[roleId] ?? 0
+                      const balance = roleBalanceLabel(observedCount, expectedCount)
+                      const remainingCount = estimatedRemainingRoleCount(
+                        sampleCount,
+                        observedCount,
+                        boxScope?.boxCount,
+                      )
+                      return (
+                        <span className={`config-role-balance balance-${balance}`} key={roleId}>
+                          <b>{roleLabel(roleId)}</b>
+                          <em>
+                            已出 {observedCount} / 样本 {sampleCount}
+                            {sample ? `/${sample.roles.length}` : ''}
+                          </em>
+                          <em>
+                            估余 {remainingCount === undefined ? '-' : remainingCount.toFixed(1)}
+                          </em>
+                          <small>{balance}</small>
+                        </span>
+                      )
+                    })}
+                  </div>
+                </article>
+              )
+            })}
           </div>
         )}
         <div className="top-list">
@@ -723,6 +882,7 @@ function App() {
                       <th>右抽前总</th>
                     </>
                   )}
+                  <th>补包</th>
                   <th>备注</th>
                 </tr>
               </thead>
@@ -868,6 +1028,32 @@ function App() {
                         </td>
                       </>
                     )}
+                    <td>
+                      <select
+                        value={record.replenishmentDirection ?? ''}
+                        onChange={(event) =>
+                          updateRecord(record.id, {
+                            replenishmentDirection:
+                              event.target.value as PackRecord['replenishmentDirection'],
+                          })
+                        }
+                      >
+                        <option value="">不确定</option>
+                        {isSingleRowLayout ? (
+                          <>
+                            <option value="left">左补</option>
+                            <option value="right">右补</option>
+                            <option value="both">两边</option>
+                          </>
+                        ) : (
+                          <>
+                            <option value="front">前补</option>
+                            <option value="back">后补</option>
+                            <option value="both">都有</option>
+                          </>
+                        )}
+                      </select>
+                    </td>
                     <td className="note-cell">
                       <input
                         type="text"
@@ -943,48 +1129,77 @@ function App() {
           </table>
         </div>
 
-        <div className="side-frequency-grid">
-          {sideGroups.map(({ side, label, shortLabel }) => {
-            const sideSsrTotal = records.filter(
-              (record) => record.side === side && record.ssrRole,
-            ).length
-            const maxSideRoleCount = Math.max(
-              1,
-              ...ROLES.map(
-                (role) =>
-                  records.filter((record) => record.side === side && record.ssrRole === role.id)
-                    .length,
-              ),
-            )
-
-            return (
-              <section className="side-frequency-card" key={side}>
+        {isSingleRowLayout ? (
+          <div className="side-frequency-grid row-segment-grid">
+            {rowSegments.map((segment) => (
+              <section className="side-frequency-card" key={segment.id}>
                 <div className="section-heading compact-heading">
                   <div>
-                    <h2>{label}SSR角色占比</h2>
-                    <p>只统计已填写“{shortLabel}”的记录，共 {sideSsrTotal} 张SSR。</p>
+                    <h2>{segment.label}SSR角色占比</h2>
+                    <p>按真实排内位置分段统计，共 {segment.total} 张SSR。</p>
                   </div>
                 </div>
                 <div className="frequency-list compact-frequency-list">
                   {ROLES.map((role) => {
-                    const count = records.filter(
-                      (record) => record.side === side && record.ssrRole === role.id,
-                    ).length
-                    const share = sideSsrTotal > 0 ? count / sideSsrTotal : 0
+                    const count = segment.records.filter((record) => record.ssrRole === role.id).length
+                    const share = segment.total > 0 ? count / segment.total : 0
                     return (
                       <div className="frequency-row" key={role.id}>
                         <span>{role.id}</span>
                         <b>{role.name}</b>
-                        <div className="bar"><i style={{ width: `${(count / maxSideRoleCount) * 100}%` }} /></div>
+                        <div className="bar"><i style={{ width: `${(count / segment.maxRoleCount) * 100}%` }} /></div>
                         <em>{percent(share)}</em>
                       </div>
                     )
                   })}
                 </div>
               </section>
-            )
-          })}
-        </div>
+            ))}
+          </div>
+        ) : (
+          <div className="side-frequency-grid">
+            {sideGroups.map(({ side, label, shortLabel }) => {
+              const sideSsrTotal = records.filter(
+                (record) => record.side === side && record.ssrRole,
+              ).length
+              const maxSideRoleCount = Math.max(
+                1,
+                ...ROLES.map(
+                  (role) =>
+                    records.filter((record) => record.side === side && record.ssrRole === role.id)
+                      .length,
+                ),
+              )
+
+              return (
+                <section className="side-frequency-card" key={side}>
+                  <div className="section-heading compact-heading">
+                    <div>
+                      <h2>{label}SSR角色占比</h2>
+                      <p>只统计已填写“{shortLabel}”的记录，共 {sideSsrTotal} 张SSR。</p>
+                    </div>
+                  </div>
+                  <div className="frequency-list compact-frequency-list">
+                    {ROLES.map((role) => {
+                      const count = records.filter(
+                        (record) => record.side === side && record.ssrRole === role.id,
+                      ).length
+                      const share = sideSsrTotal > 0 ? count / sideSsrTotal : 0
+                      return (
+                        <div className="frequency-row" key={role.id}>
+                          <span>{role.id}</span>
+                          <b>{role.name}</b>
+                          <div className="bar"><i style={{ width: `${(count / maxSideRoleCount) * 100}%` }} /></div>
+                          <em>{percent(share)}</em>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </section>
+              )
+            })}
+          </div>
+        )}
       </section>
 
       <section className="buy-panel">

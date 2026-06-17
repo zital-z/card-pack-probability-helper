@@ -6,6 +6,7 @@ import type {
   GameConfig,
   PackRecord,
   QtrContinuity,
+  QueueSignal,
   RoleId,
   RoleProbability,
 } from '../types'
@@ -180,43 +181,64 @@ function inferredRowTotals(records: PackRecord[]) {
   return totals
 }
 
-function positionedSSRRecords(records: PackRecord[], config: GameConfig) {
-  const rowTotals = inferredRowTotals(records)
+type PositionedSSRRecord = {
+  record: PackRecord
+  lane: 'left' | 'right' | 'row'
+  index: number
+  roleId: RoleId
+}
 
-  return sortedSSRRecords(records)
-    .map((record) => {
+function queuePositionedSSRRecords(records: PackRecord[], config: GameConfig): PositionedSSRRecord[] {
+  const rowTotals = inferredRowTotals(records)
+  const ordered = sortedRecords(records)
+  const orderIds = [...new Set(ordered.map((record) => record.orderId ?? record.sequence))]
+  const consumed = { left: 0, right: 0, row: 0 }
+  const positioned: PositionedSSRRecord[] = []
+
+  for (const orderId of orderIds) {
+    const orderRecords = ordered.filter((record) => (record.orderId ?? record.sequence) === orderId)
+    const orderOffset = { ...consumed }
+
+    for (const record of orderRecords) {
       const sidePosition = numericPosition(record.sidePosition)
-      if (!record.side || !sidePosition || !record.ssrRole) return undefined
+      if (!record.side || !sidePosition || !record.ssrRole) continue
 
       if (config.basketLayoutMode === 'singleRow') {
         const rowTotal = numericPosition(record.rowTotalBefore) ?? rowTotals.get(record.id)
-        const index =
+        const currentIndex =
           record.side === 'right' && rowTotal ? Math.max(1, rowTotal - sidePosition + 1) : sidePosition
-        return {
+        positioned.push({
           record,
-          lane: 'single-row',
-          index,
+          lane: 'row',
+          index: currentIndex + orderOffset.row,
           roleId: record.ssrRole,
-        }
+        })
+        continue
       }
 
-      return {
+      positioned.push({
         record,
         lane: record.side,
-        index: sidePosition,
+        index: sidePosition + orderOffset[record.side],
         roleId: record.ssrRole,
+      })
+    }
+
+    for (const record of orderRecords) {
+      if (!isFilledRecord(record) || !record.side) continue
+      if (config.basketLayoutMode === 'singleRow') {
+        consumed.row += 1
+      } else {
+        consumed[record.side] += 1
       }
-    })
-    .filter(
-      (
-        item,
-      ): item is {
-        record: PackRecord
-        lane: string
-        index: number
-        roleId: RoleId
-      } => Boolean(item),
-    )
+    }
+  }
+
+  return positioned.sort((a, b) => a.record.sequence - b.record.sequence)
+}
+
+function positionedSSRRecords(records: PackRecord[], config: GameConfig) {
+  return queuePositionedSSRRecords(records, config)
 }
 
 function calculateLocalPositionMatchScores(
@@ -266,6 +288,95 @@ function calculateLocalPositionMatchScores(
       ]
     }),
   )
+}
+
+function laneLabel(lane: QueueSignal['lane'], config: GameConfig) {
+  if (lane === 'row') {
+    if (config.replenishmentDirection === 'right') return '单排旧端附近'
+    if (config.replenishmentDirection === 'left') return '单排右端旧区'
+    return '单排局部'
+  }
+  return lane === 'left' ? '左队列局部' : '右队列局部'
+}
+
+function latestReplenishmentDirection(records: PackRecord[], config: GameConfig) {
+  return (
+    sortedRecords(records)
+      .slice()
+      .reverse()
+      .find((record) => record.replenishmentDirection && record.replenishmentDirection !== 'unknown')
+      ?.replenishmentDirection ||
+    config.replenishmentDirection ||
+    'unknown'
+  )
+}
+
+function calculateQueueSignals(records: PackRecord[], config: GameConfig): QueueSignal[] {
+  const positioned = queuePositionedSSRRecords(records, config)
+  const replenishmentDirection = latestReplenishmentDirection(records, config)
+  const queueConfig = { ...config, replenishmentDirection }
+  const lanes: Array<QueueSignal['lane']> =
+    config.basketLayoutMode === 'singleRow' ? ['row'] : ['left', 'right']
+  const observed = calculateObservedSSRCounts(records)
+
+  return lanes
+    .map((lane) => {
+      const laneRecords = positioned.filter((item) => item.lane === lane)
+      if (laneRecords.length < 6) return undefined
+
+      const latest = laneRecords[laneRecords.length - 1]
+      const local = laneRecords
+        .filter((item) => Math.abs(item.index - latest.index) <= 22)
+        .slice(-18)
+      const evidence = local.length >= 5 ? local : laneRecords.slice(-12)
+      if (evidence.length < 5) return undefined
+
+      const localCounts = emptyRoleMap()
+      const localRoles = new Set<RoleId>()
+      for (const item of evidence) {
+        const distance = Math.abs(item.index - latest.index)
+        const weight = clamp(1 - distance / 28, 0.35, 1)
+        localCounts[item.roleId] += weight
+        localRoles.add(item.roleId)
+      }
+
+      const localWeightTotal = Object.values(localCounts).reduce((sum, value) => sum + value, 0)
+      const matchedGroups = BOX_SAMPLES.map((sample) => {
+        const sampleSet = sampleRoleSet(sample.roles)
+        const sampleCounts = countsFromRoles(sample.roles)
+        const overlapWeight = ROLES.reduce(
+          (sum, role) => sum + (sampleSet.has(role.id) ? localCounts[role.id] : 0),
+          0,
+        )
+        const score = overlapWeight / Math.max(1, localWeightTotal)
+        const roleIds = ROLES.map((role) => role.id).filter((roleId) => sampleSet.has(roleId))
+        return {
+          title: sample.title,
+          score,
+          roleIds,
+          remainingRoleIds: roleIds
+            .filter((roleId) => sampleCounts[roleId] > 0 && localCounts[roleId] === 0)
+            .sort((a, b) => sampleCounts[b] - observed[b] - (sampleCounts[a] - observed[a]))
+            .slice(0, 5),
+        }
+      })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 2)
+
+      return {
+        lane,
+        label: laneLabel(lane, queueConfig),
+        evidenceCount: evidence.length,
+        centerPosition: Math.round(latest.index),
+        roleIds: [...localRoles],
+        focusRoleIds: ROLES.map((role) => role.id)
+          .filter((roleId) => localCounts[roleId] > 0)
+          .sort((a, b) => localCounts[b] - localCounts[a])
+          .slice(0, 6),
+        matchedGroups,
+      }
+    })
+    .filter((signal): signal is QueueSignal => Boolean(signal))
 }
 
 function topRoleSet(counts: Record<RoleId, number>, limit: number) {
@@ -684,6 +795,7 @@ function calculateConfidence(
 export function calculateProbabilities(records: PackRecord[], config: GameConfig): CalculationResult {
   const qtrContinuity = calculateQTRContinuity(records)
   const configuration = calculateConfigurationSignal(records, config)
+  const queueSignals = calculateQueueSignals(records, config)
   const { scores, reasons, shift } = calculateRoleScores(
     records,
     config,
@@ -733,6 +845,7 @@ export function calculateProbabilities(records: PackRecord[], config: GameConfig
     observedSSRSlotRate,
     qtrContinuity,
     configuration,
+    queueSignals,
     confidence: calculateConfidence(records, qtrContinuity, configuration),
     warnings,
   }
